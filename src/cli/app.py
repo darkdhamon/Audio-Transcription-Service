@@ -10,7 +10,6 @@ all business logic.
 
 from pathlib import Path
 import argparse
-import os
 from typing import Dict, List, Optional
 
 from rich.console import Console
@@ -50,7 +49,8 @@ class RichProgressHandler:
             console=console,
             transient=False,
         )
-        self.task_by_file: Dict[str, int] = {}
+        # Track tasks by the absolute file path they relate to for consistent updates
+        self.task_by_file: Dict[Path, int] = {}
 
     def __enter__(self) -> "RichProgressHandler":
         self.progress.__enter__()
@@ -62,30 +62,42 @@ class RichProgressHandler:
     def handle(self, msg: Dict) -> None:
         t = msg.get("type")
         if t == "start":
-            file_short = os.path.basename(msg["file"])
+            path = Path(msg["file"])
             duration = msg.get("duration", 0.0)
-            task_id = self.progress.add_task("transcribe", total=max(duration, 1.0), filename=file_short)
-            self.task_by_file[msg["file"]] = task_id
+            task_id = self.progress.add_task(
+                "transcribe", total=max(duration, 1.0), filename=path.name
+            )
+            self.task_by_file[path] = task_id
         elif t == "progress":
-            file = msg["file"]
+            path = Path(msg["file"])
             pos = float(msg.get("pos", 0.0))
-            task = self.task_by_file.get(file)
+            task = self.task_by_file.get(path)
             if task is not None:
                 self.progress.update(task, completed=pos)
         elif t in ("done", "skipped"):
-            file = msg["file"]
-            task = self.task_by_file.get(file)
+            path = Path(msg["file"])
+            task = self.task_by_file.get(path)
             if task is not None:
                 self.progress.update(task, advance=0)
                 self.progress.stop_task(task)
 
 
-def prompt_speaker_names(files: List[str], profile: Optional[GameProfile] = None) -> Dict[str, str]:
+def prompt_speaker_names(
+    files: List[Path], profile: Optional[GameProfile] = None
+) -> Dict[str, str]:
     """Prompt the user to assign character names to each audio file.
 
-    If a :class:`GameProfile` is supplied the function will use previously
-    stored character names as suggestions and update the profile with any
-    new mappings provided by the user.
+    Parameters
+    ----------
+    files:
+        List of ``Path`` objects pointing to audio recordings.
+    profile:
+        Optional profile storing previously used character mappings.
+
+    Returns
+    -------
+    Dict[str, str]
+        Mapping of lowercase filenames to chosen speaker labels.
     """
 
     console.print(
@@ -93,7 +105,7 @@ def prompt_speaker_names(files: List[str], profile: Optional[GameProfile] = None
     )
     mapping: Dict[str, str] = {}
     for path in files:
-        base = os.path.basename(path)
+        base = path.name
 
         # Derive TeamSpeak display name from the file name. This is used for
         # lookups in the profile and as the default suggestion.
@@ -163,43 +175,48 @@ def main(profile: Optional[GameProfile] = None) -> Dict[str, str]:
     options = build_options(args)
     service = TranscriptionService(options)
 
+    # Use ``Path`` objects to manage filesystem locations in an OS-agnostic way
+    input_dir = Path(args.input)
+    out_base = Path(args.out)
+
     if args.merge_parts:
-        count = service.merge_parts(args.input, args.out)
-        console.print(f"Merged {count} part files -> {args.out}.txt / .srt / .json")
+        count = service.merge_parts(str(input_dir), str(out_base))
+        console.print(f"Merged {count} part files -> {out_base}.txt / .srt / .json")
         return
 
     if args.only:
-        files = [os.path.join(args.input, args.only)]
-        if os.path.basename(files[0]).lower().startswith("capture_"):
+        files = [input_dir / args.only]
+        if files[0].name.lower().startswith("capture_"):
             raise SystemExit("'capture_' files are ignored for transcription.")
     else:
-        files = list_audio_files(args.input)
+        files = [Path(p) for p in list_audio_files(str(input_dir))]
 
     if not files:
         raise SystemExit("No audio files found (capture_* are ignored by design).")
 
     offsets: Dict[str, float] = {}
     if not args.no_filename_ts:
-        offsets.update(filename_offsets(files, args.input, args.baseline))
+        offsets.update(
+            filename_offsets([str(f) for f in files], str(input_dir), args.baseline)
+        )
         if offsets:
             console.print("[dim]Auto-offsets from filenames:[/dim]")
             for name, off in sorted(offsets.items()):
                 console.print(f"  {name} -> +{off:.3f}s")
 
     if args.no_prompt:
-        speakers = {
-            os.path.basename(p).lower(): derive_suggested_label(os.path.basename(p))
-            for p in files
-        }
+        speakers = {p.name.lower(): derive_suggested_label(p.name) for p in files}
     else:
         speakers = prompt_speaker_names(files, profile)
 
-    console.print(f"Processing {len(files)} file(s) with up to {args.workers or 'auto'} parallel worker(s)…")
+    console.print(
+        f"Processing {len(files)} file(s) with up to {args.workers or 'auto'} parallel worker(s)…"
+    )
 
     with RichProgressHandler() as progress:
         service.transcribe(
-            args.input,
-            args.out,
+            str(input_dir),
+            str(out_base),
             speakers,
             offsets=offsets,
             workers=args.workers,
@@ -209,7 +226,9 @@ def main(profile: Optional[GameProfile] = None) -> Dict[str, str]:
             baseline=args.baseline,
         )
 
-    console.print(f"\nAll done. Outputs -> {args.out}.txt / .srt / {args.out}.json")
+    console.print(
+        f"\nAll done. Outputs -> {out_base}.txt / .srt / {out_base}.json"
+    )
     return speakers
 
 
