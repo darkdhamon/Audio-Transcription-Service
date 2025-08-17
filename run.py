@@ -20,8 +20,12 @@ from pathlib import Path
 from datetime import datetime
 import json
 import sys
-from typing import Any
 
+# Ensure application modules can be imported without installing the package
+root = Path(__file__).resolve().parent
+sys.path.insert(0, str(root / "src"))
+
+from typing import Any
 from rich.console import Console
 
 from domain.config import GameSettings, GameProfile, LastSession
@@ -133,9 +137,7 @@ def choose_game_profile(settings_path: Path, console: Console) -> tuple[str, Gam
 
 
 def main() -> None:
-    root = Path(__file__).resolve().parent
-    sys.path.insert(0, str(root / "src"))
-
+    # ``root`` already points to repository root via module-level setup.
     console = Console()
     config_path = root / CONFIG_FILE
     recordings_dir = ensure_recording_dir(config_path, console)
