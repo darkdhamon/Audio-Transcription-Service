@@ -326,10 +326,43 @@ def run_parallel(
 
 
 def derive_suggested_label(filename: str) -> str:
+    """Derive a human friendly speaker label from an audio ``filename``.
+
+    The recording files follow the convention
+    ``playback_<display name>_<user id>_<timestamp>.wav``.  Character name
+    suggestions should therefore be based on the TeamSpeak display name and
+    must ignore both the numeric user id and timestamp portion.
+
+    Parameters
+    ----------
+    filename:
+        Name of the audio file including extension.
+
+    Returns
+    -------
+    str
+        Suggested label derived from the TeamSpeak display name or
+        ``"speaker"`` if no name could be parsed.
+    """
+
+    # Strip the file extension and known prefix
     base = os.path.splitext(filename)[0]
     base = re.sub(r"^playback_", "", base, flags=re.IGNORECASE)
+
+    # Remove timestamp (e.g. 2024-01-01_12-00-00.000)
     base = TS_RE.sub("", base)
+
+    # Clean up trailing separators left behind after removing the timestamp
     base = re.sub(r"[_\- ]+$", "", base)
+
+    # Drop the trailing user id if present.  The id is numeric and separated
+    # from the display name by an underscore.
+    base = re.sub(r"_[0-9]+$", "", base)
+
+    # Final cleanup in case stripping the user id introduced a trailing
+    # separator again.
+    base = re.sub(r"[_\- ]+$", "", base)
+
     return base or "speaker"
 
 
