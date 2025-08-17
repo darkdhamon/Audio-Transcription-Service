@@ -2,7 +2,57 @@
   "profiles": {
     "Shadows of Draxis": {
       "campaign": "Shadows of draxis",
-      "players": []
+      "players": [
+        {
+          "display_name": "GM",
+          "character_name": "Game Master"
+        },
+        {
+          "display_name": "Ijtzoi (Vivid Memory)",
+          "character_name": "Vivid Memory"
+        },
+        {
+          "display_name": "Jesse (Goku)",
+          "character_name": "Goku Yuwono"
+        },
+        {
+          "display_name": "LGDarksteed (Tolprok)",
+          "character_name": "Tolprok"
+        },
+        {
+          "display_name": "Red (Oranos)",
+          "character_name": "Oranos Blackwater"
+        }
+      ]
+    },
+    "Test": {
+      "campaign": "Test",
+      "players": [
+        {
+          "display_name": "playback_4XL_(Bronze)_998_2025-08-17_13-21-29.289681",
+          "character_name": "Axl"
+        },
+        {
+          "display_name": "playback_Bronze_(Playing_Game)_1002_2025-08-17_13-22-29.349891",
+          "character_name": "Bronze"
+        },
+        {
+          "display_name": "playback_GM_(Bronze)_1001_2025-08-17_13-22-11.331478",
+          "character_name": "GM"
+        },
+        {
+          "display_name": "4XL_(Bronze)",
+          "character_name": "4X1"
+        },
+        {
+          "display_name": "Bronze_(Playing_Game)",
+          "character_name": "Bronze"
+        },
+        {
+          "display_name": "GM_(Bronze)",
+          "character_name": "GM"
+        }
+      ]
     }
   }
 }
