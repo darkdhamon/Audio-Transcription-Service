@@ -213,13 +213,6 @@ def worker_transcribe(
     prog_q: Queue,
     speaker_label: str,
 ) -> None:
-    try:
-        from faster_whisper import WhisperModel  # type: ignore
-    except ImportError as exc:
-        raise RuntimeError(
-            "The 'faster-whisper' package is required. Install it with 'pip install faster-whisper'."
-        ) from exc
-
     part_json = file_path + ".json.part"
     if options.skip_existing and os.path.exists(part_json):
         try:
@@ -234,41 +227,36 @@ def worker_transcribe(
     prog_q.put(
         {"type": "start", "file": file_path, "speaker": speaker_label, "duration": duration}
     )
+    from domain.WhisperX.transcribe import transcribe as wx_transcribe
 
-    model = WhisperModel(
-        options.model, device="cpu", compute_type="int8", cpu_threads=cpu_threads or 0
+    segments = wx_transcribe(
+        audio_path=file_path,
+        options=options,
+        vad_params=vad_params,
+        offset=offset,
+        speaker_label=speaker_label,
     )
-
-    transcribe_kwargs = dict(
-        language=options.lang
-        if options.model not in ("large", "large-v2", "large-v3")
-        else None,
-        vad_filter=bool(vad_params),
-        beam_size=options.beam,
-        temperature=options.temperature,
-    )
-    if vad_params:
-        transcribe_kwargs["vad_parameters"] = vad_params
-
-    segments, _info = model.transcribe(file_path, **transcribe_kwargs)
 
     out: List[Dict] = []
     last_emit = 0.0
     junk = set(options.junk_words or [])
 
     for seg in segments:
-        start = float(seg.start) + offset
-        end = float(seg.end) + offset
-        item = {"speaker": speaker_label, "start": start, "end": end, "text": seg.text.strip()}
-
-        if options.squelch and is_junk(item, options.squelch_max_dur, junk):
+        if options.squelch and is_junk(seg, options.squelch_max_dur, junk):
             continue
 
-        out.append(item)
+        out.append(seg)
 
         now = time.time()
         if duration > 0 and now - last_emit > 0.25:
-            prog_q.put({"type": "progress", "file": file_path, "pos": max(0.0, end), "duration": duration})
+            prog_q.put(
+                {
+                    "type": "progress",
+                    "file": file_path,
+                    "pos": max(0.0, seg["end"]),
+                    "duration": duration,
+                }
+            )
             last_emit = now
 
     with open(part_json, "w", encoding="utf-8") as f:
