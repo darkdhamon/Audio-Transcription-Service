@@ -29,6 +29,9 @@ from contextlib import redirect_stderr, redirect_stdout
 AUDIO_EXTS = (".wav", ".mp3", ".m4a", ".flac", ".ogg", ".aac")
 TS_RE = re.compile(r"(20\d{2}-\d{2}-\d{2})_(\d{2}-\d{2}-\d{2})(?:\.(\d{3,6}))?")
 
+# Module-level logger to keep logging consistent across processes
+logger = logging.getLogger(__name__)
+
 
 @dataclass
 class TranscriptionOptions:
@@ -378,14 +381,14 @@ def run_parallel(
                         active.pop(i)
 
                     if proc.exitcode:
-                        logging.error("Worker for %s exited with %s", file, proc.exitcode)
+                        logger.error("Worker for %s exited with %s", file, proc.exitcode)
                         stdout = info.get("stdout", "")
                         stderr = info.get("stderr", "")
                         tb = info.get("traceback", "")
                         if tb:
-                            logging.error(tb)
+                            logger.error(tb)
                         if stdout or stderr:
-                            logging.error("stdout:\n%s\nstderr:\n%s", stdout, stderr)
+                            logger.error("stdout:\n%s\nstderr:\n%s", stdout, stderr)
                         # Ensure no orphan processes continue running after a failure
                         for _f, _p, _c in active:
                             try:
