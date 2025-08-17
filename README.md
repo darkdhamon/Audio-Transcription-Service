@@ -26,4 +26,10 @@ Once dependencies are installed, launch the transcription CLI with:
 python run.py --help
 ```
 
-The `run.py` helper adds the `src` directory to `PYTHONPATH`, allowing the app to be started with a double-click or from the command line without extra setup.
+The `run.py` helper adds the `src` directory to `PYTHONPATH`, allowing the app to be started with a double-click or from the command line without extra setup. On first run the application will prompt for the location of your recordings directory, store it in `appsettings.json`, list session folders within that directory, and ask you to choose one for transcription.
+
+On Windows you can also use the `start.ps1` script, which simply launches the application:
+
+```powershell
+./start.ps1
+```
