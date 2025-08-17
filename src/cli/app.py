@@ -94,12 +94,17 @@ def prompt_speaker_names(files: List[str], profile: Optional[GameProfile] = None
     mapping: Dict[str, str] = {}
     for path in files:
         base = os.path.basename(path)
-        display = os.path.splitext(base)[0]
-        suggested = None
+
+        # Derive TeamSpeak display name from the file name. This is used for
+        # lookups in the profile and as the default suggestion.
+        display = derive_suggested_label(base)
+
+        suggested: Optional[str] = None
         if profile is not None:
             suggested = profile.get_character(display)
         if not suggested:
-            suggested = derive_suggested_label(base)
+            suggested = display
+
         reply = console.input(f"  {base} -> [bold][{suggested}][/bold]: ")
         name = reply.strip() or suggested
         mapping[base.lower()] = name
