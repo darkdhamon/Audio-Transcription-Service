@@ -26,7 +26,7 @@ Once dependencies are installed, launch the transcription CLI with:
 python run.py --help
 ```
 
-The `run.py` helper adds the `src` directory to `PYTHONPATH`, allowing the app to be started with a double-click or from the command line without extra setup. On first run the application will prompt for the location of your recordings directory, store it in `appsettings.json`, list session folders within that directory, and ask you to choose one for transcription.
+The `run.py` helper adds the `src` directory to `PYTHONPATH`, allowing the app to be started with a double-click or from the command line without extra setup. On first run the application will prompt for the location of your recordings directory, store it in `appsettings.json`, list session folders within that directory ordered by recency, and let you pick one. Pressing enter without a choice selects the most recent session. After choosing a session you can select an existing game profile or create a new one, and the transcript is saved to `transcript/<CampaignName>Transcript.txt` inside the session folder.
 
 On Windows you can also use the `start.ps1` script, which simply launches the application:
 
