@@ -291,16 +291,23 @@ def run_parallel(
     active: List[Tuple[str, Process]] = []
     pending = list(files)
     finished_parts: List[str] = []
+    # Compute the VAD parameters once and reuse for all workers to avoid
+    # redundant calculations in each spawned process.
+    vad_params = build_vad_parameters(options)
 
-    def spawn_one(path: str) -> Process:
-        label = speakers.get(os.path.basename(path).lower(), os.path.splitext(os.path.basename(path))[0])
+    def spawn_one(path: str, vad_params: Optional[dict]) -> Process:
+        """Start a worker process for ``path`` using cached VAD settings."""
+        label = speakers.get(
+            os.path.basename(path).lower(),
+            os.path.splitext(os.path.basename(path))[0],
+        )
         off = float(offsets.get(os.path.basename(path).lower(), 0.0))
         p = Process(
             target=worker_transcribe,
             args=(
                 path,
                 options,
-                build_vad_parameters(options),
+                vad_params,
                 off,
                 options.cpu_threads,
                 prog_q,
@@ -312,7 +319,7 @@ def run_parallel(
 
     while pending and len(active) < workers:
         f = pending.pop(0)
-        active.append((f, spawn_one(f)))
+        active.append((f, spawn_one(f, vad_params)))
 
     alive = True
     while alive:
@@ -337,7 +344,7 @@ def run_parallel(
                     break
             if pending:
                 nxt = pending.pop(0)
-                active.append((nxt, spawn_one(nxt)))
+                active.append((nxt, spawn_one(nxt, vad_params)))
 
         alive = bool(active) or bool(pending)
 
