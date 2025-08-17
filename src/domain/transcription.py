@@ -10,7 +10,8 @@ front-end can drive the functions here without modification.
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from multiprocessing import Process, Queue, cpu_count
+from multiprocessing import Pipe, Process, Queue, cpu_count
+from multiprocessing.connection import Connection
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Tuple
 import json
@@ -20,6 +21,10 @@ import re
 import subprocess
 import time
 import unicodedata
+import io
+import logging
+import traceback
+from contextlib import redirect_stderr, redirect_stdout
 
 AUDIO_EXTS = (".wav", ".mp3", ".m4a", ".flac", ".ogg", ".aac")
 TS_RE = re.compile(r"(20\d{2}-\d{2}-\d{2})_(\d{2}-\d{2}-\d{2})(?:\.(\d{3,6}))?")
@@ -266,18 +271,65 @@ def run_parallel(
     options: TranscriptionOptions,
     progress_callback: Optional[Callable[[Dict], None]] = None,
 ) -> List[str]:
-    """Spawn worker processes to transcribe ``files`` in parallel."""
+    """Spawn worker processes to transcribe ``files`` in parallel.
+
+    The function manages worker lifecycle and bubbles up any failures from
+    child processes. Captured ``stdout``/``stderr`` output is logged when a
+    worker exits abnormally to aid debugging.
+    """
 
     prog_q: Queue = Queue()
-    active: List[Tuple[str, Process]] = []
+    active: List[Tuple[str, Process, Connection]] = []
     pending = list(files)
     finished_parts: List[str] = []
 
-    def spawn_one(path: str) -> Process:
-        label = speakers.get(os.path.basename(path).lower(), os.path.splitext(os.path.basename(path))[0])
+    def worker_wrapper(
+        path: str,
+        options: TranscriptionOptions,
+        vad_params: Optional[dict],
+        off: float,
+        cpu_threads: int,
+        prog_q: Queue,
+        speaker_label: str,
+        conn: Connection,
+    ) -> None:
+        """Invoke :func:`worker_transcribe` and relay its console output."""
+
+        buf_out = io.StringIO()
+        buf_err = io.StringIO()
+        try:
+            with redirect_stdout(buf_out), redirect_stderr(buf_err):
+                worker_transcribe(
+                    path,
+                    options,
+                    vad_params,
+                    off,
+                    cpu_threads,
+                    prog_q,
+                    speaker_label,
+                )
+            conn.send({"ok": True, "stdout": buf_out.getvalue(), "stderr": buf_err.getvalue()})
+        except Exception:
+            conn.send(
+                {
+                    "ok": False,
+                    "stdout": buf_out.getvalue(),
+                    "stderr": buf_err.getvalue(),
+                    "traceback": traceback.format_exc(),
+                }
+            )
+            raise
+        finally:
+            conn.close()
+
+    def spawn_one(path: str) -> Tuple[Process, Connection]:
+        label = speakers.get(
+            os.path.basename(path).lower(), os.path.splitext(os.path.basename(path))[0]
+        )
         off = float(offsets.get(os.path.basename(path).lower(), 0.0))
+        parent_conn, child_conn = Pipe(duplex=False)
         p = Process(
-            target=worker_transcribe,
+            target=worker_wrapper,
             args=(
                 path,
                 options,
@@ -286,14 +338,17 @@ def run_parallel(
                 options.cpu_threads,
                 prog_q,
                 label,
+                child_conn,
             ),
         )
         p.start()
-        return p
+        child_conn.close()  # only the worker uses the child end
+        return p, parent_conn
 
     while pending and len(active) < workers:
         f = pending.pop(0)
-        active.append((f, spawn_one(f)))
+        proc, conn = spawn_one(f)
+        active.append((f, proc, conn))
 
     alive = True
     while alive:
@@ -309,16 +364,42 @@ def run_parallel(
             if msg["type"] == "done":
                 finished_parts.append(msg["part"])
             file = msg["file"]
-            for i, (f, proc) in enumerate(active):
+            for i, (f, proc, conn) in enumerate(active):
                 if f == file:
                     try:
                         proc.join()
+                        info = {}
+                        try:
+                            info = conn.recv()
+                        except EOFError:
+                            info = {}
                     finally:
+                        conn.close()
                         active.pop(i)
+
+                    if proc.exitcode:
+                        logging.error("Worker for %s exited with %s", file, proc.exitcode)
+                        stdout = info.get("stdout", "")
+                        stderr = info.get("stderr", "")
+                        tb = info.get("traceback", "")
+                        if tb:
+                            logging.error(tb)
+                        if stdout or stderr:
+                            logging.error("stdout:\n%s\nstderr:\n%s", stdout, stderr)
+                        # Ensure no orphan processes continue running after a failure
+                        for _f, _p, _c in active:
+                            try:
+                                if _p.is_alive():
+                                    _p.terminate()
+                                _p.join()
+                            finally:
+                                _c.close()
+                        raise RuntimeError(f"Worker failed for {file}")
                     break
             if pending:
                 nxt = pending.pop(0)
-                active.append((nxt, spawn_one(nxt)))
+                proc, conn = spawn_one(nxt)
+                active.append((nxt, proc, conn))
 
         alive = bool(active) or bool(pending)
 

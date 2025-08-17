@@ -196,18 +196,22 @@ def main(profile: Optional[GameProfile] = None) -> Dict[str, str]:
 
     console.print(f"Processing {len(files)} file(s) with up to {args.workers or 'auto'} parallel worker(s)…")
 
-    with RichProgressHandler() as progress:
-        service.transcribe(
-            args.input,
-            args.out,
-            speakers,
-            offsets=offsets,
-            workers=args.workers,
-            progress_callback=progress.handle,
-            only=args.only,
-            skip_filename_ts=args.no_filename_ts,
-            baseline=args.baseline,
-        )
+    try:
+        with RichProgressHandler() as progress:
+            service.transcribe(
+                args.input,
+                args.out,
+                speakers,
+                offsets=offsets,
+                workers=args.workers,
+                progress_callback=progress.handle,
+                only=args.only,
+                skip_filename_ts=args.no_filename_ts,
+                baseline=args.baseline,
+            )
+    except Exception as exc:
+        console.print(f"[red]Transcription failed:[/red] {exc}")
+        raise SystemExit(1)
 
     console.print(f"\nAll done. Outputs -> {args.out}.txt / .srt / {args.out}.json")
     return speakers
