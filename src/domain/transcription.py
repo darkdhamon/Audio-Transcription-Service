@@ -14,6 +14,7 @@ from multiprocessing import Process, Queue, cpu_count
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Tuple
 import json
+import logging
 import os
 import queue
 import re
@@ -23,6 +24,8 @@ import unicodedata
 
 AUDIO_EXTS = (".wav", ".mp3", ".m4a", ".flac", ".ogg", ".aac")
 TS_RE = re.compile(r"(20\d{2}-\d{2}-\d{2})_(\d{2}-\d{2}-\d{2})(?:\.(\d{3,6}))?")
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -109,6 +112,12 @@ def list_audio_files(folder: str) -> List[str]:
 
 
 def get_duration_seconds(path: str) -> float:
+    """Return the duration of ``path`` in seconds using ``ffprobe``.
+
+    A warning is logged and ``0.0`` is returned if ``ffprobe`` is missing or
+    fails to probe the file.
+    """
+
     try:
         res = subprocess.run(
             [
@@ -126,8 +135,13 @@ def get_duration_seconds(path: str) -> float:
             check=True,
         )
         return float(res.stdout.strip())
-    except Exception:
-        return 0.0
+    except FileNotFoundError:
+        logger.warning("ffprobe is not installed or not found in PATH")
+    except subprocess.CalledProcessError as exc:
+        logger.warning("ffprobe failed for %s: %s", path, exc)
+    except Exception as exc:
+        logger.warning("unexpected error running ffprobe on %s: %s", path, exc)
+    return 0.0
 
 
 def _norm_text(t: str) -> str:
@@ -199,7 +213,12 @@ def worker_transcribe(
     prog_q: Queue,
     speaker_label: str,
 ) -> None:
-    from faster_whisper import WhisperModel  # import inside process
+    try:
+        from faster_whisper import WhisperModel  # type: ignore
+    except ImportError as exc:
+        raise RuntimeError(
+            "The 'faster-whisper' package is required. Install it with 'pip install faster-whisper'."
+        ) from exc
 
     part_json = file_path + ".json.part"
     if options.skip_existing and os.path.exists(part_json):
@@ -398,6 +417,32 @@ class TranscriptionService:
     def __init__(self, options: TranscriptionOptions) -> None:
         self.options = options
 
+    def validate_dependencies(self) -> None:
+        """Ensure required external tools and libraries are available.
+
+        Raises
+        ------
+        RuntimeError
+            If ``faster-whisper`` or ``ffprobe`` is missing from the
+            environment.
+        """
+
+        try:  # Verify Python package is installed
+            import faster_whisper  # type: ignore  # noqa: F401
+        except ImportError as exc:
+            raise RuntimeError(
+                "The 'faster-whisper' package is required. Install it with 'pip install faster-whisper'."
+            ) from exc
+
+        try:  # Verify ffprobe command is available
+            subprocess.run(["ffprobe", "-version"], capture_output=True, check=True)
+        except FileNotFoundError as exc:
+            raise RuntimeError(
+                "ffprobe was not found. Install FFmpeg and ensure 'ffprobe' is on your PATH."
+            ) from exc
+        except subprocess.CalledProcessError as exc:
+            raise RuntimeError("ffprobe is installed but failed to run properly") from exc
+
     def transcribe(
         self,
         input_dir: str,
@@ -410,6 +455,9 @@ class TranscriptionService:
         skip_filename_ts: bool = False,
         baseline: str = "earliest",
     ) -> None:
+        # Ensure required tools and libraries exist before processing
+        self.validate_dependencies()
+
         if only:
             files = [os.path.join(input_dir, only)]
             if os.path.basename(files[0]).lower().startswith("capture_"):
