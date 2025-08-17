@@ -11,6 +11,7 @@ import json
 import sys
 
 import pytest
+from typing import Dict, List
 
 
 # Ensure the ``src`` package is importable when running tests directly.
@@ -24,6 +25,31 @@ from domain.transcription import (
     filename_offsets,
     parse_ts_from_name,
 )
+
+
+def dummy_worker(
+    file_path: str,
+    options: TranscriptionOptions,
+    vad_params: Dict,
+    offset: float,
+    cpu_threads: int,
+    prog_q,
+    speaker_label: str,
+) -> None:
+    """Lightweight stand-in for ``worker_transcribe`` used in tests.
+
+    The worker immediately reports completion and includes the ``id`` of the
+    VAD parameters so tests can verify parameter reuse across processes.
+    """
+
+    prog_q.put(
+        {
+            "type": "done",
+            "file": file_path,
+            "part": file_path + ".json.part",
+            "vp_id": id(vad_params),
+        }
+    )
 
 
 class TestParseTimestamp:
@@ -135,3 +161,42 @@ class TestTranscriptionService:
         service = TranscriptionService(TranscriptionOptions())
         with pytest.raises(FileNotFoundError):
             service.merge_parts(str(tmp_path), str(tmp_path / "out"))
+
+
+class TestRunParallelCaching:
+    """Ensure that VAD parameters are computed once and reused."""
+
+    def test_vad_parameters_cached(self, monkeypatch, tmp_path: Path) -> None:
+        """``build_vad_parameters`` should be invoked only once."""
+
+        from domain import transcription
+
+        call_count = 0
+
+        def fake_build_vad_parameters(opts: TranscriptionOptions) -> Dict:
+            nonlocal call_count
+            call_count += 1
+            return {"foo": "bar"}
+
+        monkeypatch.setattr(transcription, "build_vad_parameters", fake_build_vad_parameters)
+        monkeypatch.setattr(transcription, "worker_transcribe", dummy_worker)
+
+        options = transcription.TranscriptionOptions(vad=True)
+        vp_ids: List[int] = []
+
+        def progress(msg: Dict) -> None:
+            if msg.get("type") == "done":
+                vp_ids.append(msg["vp_id"])
+
+        files = [str(tmp_path / "a.wav"), str(tmp_path / "b.wav")]
+        transcription.run_parallel(
+            files,
+            workers=2,
+            speakers={},
+            offsets={},
+            options=options,
+            progress_callback=progress,
+        )
+
+        assert call_count == 1
+        assert len(set(vp_ids)) == 1
