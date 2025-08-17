@@ -80,6 +80,40 @@ class GameProfile:
     campaign: str
     players: List[Player] = field(default_factory=list)
 
+    def get_character(self, display_name: str) -> Optional[str]:
+        """Return the character name for ``display_name`` if known.
+
+        Parameters
+        ----------
+        display_name:
+            TeamSpeak display name of the player.
+
+        Returns
+        -------
+        Optional[str]
+            The previously used character name or ``None`` if the
+            player has not been recorded before.
+        """
+
+        for player in self.players:
+            if player.display_name.lower() == display_name.lower():
+                return player.character_name
+        return None
+
+    def set_player(self, display_name: str, character_name: str) -> None:
+        """Add or update a player's character mapping.
+
+        The method either updates an existing player's character name or
+        appends a new :class:`Player` entry if the player is encountered
+        for the first time.
+        """
+
+        for player in self.players:
+            if player.display_name.lower() == display_name.lower():
+                player.character_name = character_name
+                return
+        self.players.append(Player(display_name=display_name, character_name=character_name))
+
 
 @dataclass
 class GameSettings:
