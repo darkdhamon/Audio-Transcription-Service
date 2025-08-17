@@ -17,3 +17,13 @@ Set-ExecutionPolicy Bypass -Scope Process -Force
 ```
 
 After completion, WhisperX will be available for transcribing audio files.
+
+## Running the application
+
+Once dependencies are installed, launch the transcription CLI with:
+
+```bash
+python run.py --help
+```
+
+The `run.py` helper adds the `src` directory to `PYTHONPATH`, allowing the app to be started with a double-click or from the command line without extra setup.
