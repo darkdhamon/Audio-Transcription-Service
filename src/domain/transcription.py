@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from multiprocessing import Process, Queue, cpu_count
 from pathlib import Path
-from typing import Callable, Dict, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Tuple, Literal
 import json
 import logging
 import os
@@ -46,6 +46,7 @@ class TranscriptionOptions:
     squelch_max_dur: float = 1.2
     junk_words: Optional[List[str]] = None
     skip_existing: bool = False
+    engine: Literal["faster-whisper", "whisperx"] = "faster-whisper"
 
 
 def parse_ts_from_name(name: str) -> Optional[float]:
@@ -212,6 +213,7 @@ def worker_transcribe(
     cpu_threads: int,
     prog_q: Queue,
     speaker_label: str,
+    transcribe_fn: Callable[[str, TranscriptionOptions, Optional[dict], float, str], List[Dict]],
 ) -> None:
     part_json = file_path + ".json.part"
     if options.skip_existing and os.path.exists(part_json):
@@ -227,9 +229,7 @@ def worker_transcribe(
     prog_q.put(
         {"type": "start", "file": file_path, "speaker": speaker_label, "duration": duration}
     )
-    from domain.WhisperX.transcribe import transcribe as wx_transcribe
-
-    segments = wx_transcribe(
+    segments = transcribe_fn(
         audio_path=file_path,
         options=options,
         vad_params=vad_params,
@@ -283,6 +283,14 @@ def run_parallel(
     # redundant calculations in each spawned process.
     vad_params = build_vad_parameters(options)
 
+    # Resolve the backend transcription function based on the selected engine.
+    if options.engine == "whisperx":
+        from domain.WhisperX.transcribe import transcribe as backend_transcribe
+    elif options.engine == "faster-whisper":
+        from domain.FasterWhisper.transcribe import transcribe as backend_transcribe
+    else:  # pragma: no cover - defensive programming
+        raise ValueError(f"Unsupported engine: {options.engine}")
+
     def spawn_one(path: str, vad_params: Optional[dict]) -> Process:
         """Start a worker process for ``path`` using cached VAD settings."""
         label = speakers.get(
@@ -300,6 +308,7 @@ def run_parallel(
                 options.cpu_threads,
                 prog_q,
                 label,
+                backend_transcribe,
             ),
         )
         p.start()
@@ -423,10 +432,14 @@ class TranscriptionService:
         """
 
         try:  # Verify Python package is installed
-            import faster_whisper  # type: ignore  # noqa: F401
+            if self.options.engine == "whisperx":
+                import whisperx  # type: ignore  # noqa: F401
+            else:
+                import faster_whisper  # type: ignore  # noqa: F401
         except ImportError as exc:
+            pkg = "whisperx" if self.options.engine == "whisperx" else "faster-whisper"
             raise RuntimeError(
-                "The 'faster-whisper' package is required. Install it with 'pip install faster-whisper'."
+                f"The '{pkg}' package is required. Install it with 'pip install {pkg}'."
             ) from exc
 
         try:  # Verify ffprobe command is available

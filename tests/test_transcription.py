@@ -35,11 +35,14 @@ def dummy_worker(
     cpu_threads: int,
     prog_q,
     speaker_label: str,
+    transcribe_fn,
 ) -> None:
     """Lightweight stand-in for ``worker_transcribe`` used in tests.
 
     The worker immediately reports completion and includes the ``id`` of the
-    VAD parameters so tests can verify parameter reuse across processes.
+    VAD parameters so tests can verify parameter reuse across processes.  It
+    also records which backend was requested by reporting the module name of
+    ``transcribe_fn``.
     """
 
     prog_q.put(
@@ -48,6 +51,7 @@ def dummy_worker(
             "file": file_path,
             "part": file_path + ".json.part",
             "vp_id": id(vad_params),
+            "backend": getattr(transcribe_fn, "__module__", ""),
         }
     )
 
@@ -200,3 +204,46 @@ class TestRunParallelCaching:
 
         assert call_count == 1
         assert len(set(vp_ids)) == 1
+
+
+class TestEngineSelection:
+    """Ensure the correct backend is chosen based on the options."""
+
+    def test_run_parallel_selects_backend(self, monkeypatch, tmp_path: Path) -> None:
+        from domain import transcription
+
+        # Reuse the ``dummy_worker`` to observe which backend is passed.
+        monkeypatch.setattr(transcription, "worker_transcribe", dummy_worker)
+
+        audio = tmp_path / "sample.wav"
+        audio.write_text("dummy")
+        files = [str(audio)]
+
+        backends: List[str] = []
+
+        def progress(msg: Dict) -> None:
+            if msg.get("type") == "done":
+                backends.append(msg.get("backend", ""))
+
+        opts = transcription.TranscriptionOptions(engine="whisperx")
+        transcription.run_parallel(
+            files,
+            workers=1,
+            speakers={},
+            offsets={},
+            options=opts,
+            progress_callback=progress,
+        )
+        assert backends == ["domain.WhisperX.transcribe"]
+
+        backends.clear()
+        opts = transcription.TranscriptionOptions(engine="faster-whisper")
+        transcription.run_parallel(
+            files,
+            workers=1,
+            speakers={},
+            offsets={},
+            options=opts,
+            progress_callback=progress,
+        )
+        assert backends == ["domain.FasterWhisper.transcribe"]
