@@ -11,7 +11,7 @@ all business logic.
 from pathlib import Path
 import argparse
 import os
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 from rich.console import Console
 from rich.progress import (
@@ -30,6 +30,7 @@ from domain.transcription import (
     filename_offsets,
     list_audio_files,
 )
+from domain.config import GameProfile
 
 console = Console()
 
@@ -79,15 +80,31 @@ class RichProgressHandler:
                 self.progress.stop_task(task)
 
 
-def prompt_speaker_names(files: List[str]) -> Dict[str, str]:
-    console.print("\nAssign character names to files. Press Enter to accept the suggested name in [brackets].")
+def prompt_speaker_names(files: List[str], profile: Optional[GameProfile] = None) -> Dict[str, str]:
+    """Prompt the user to assign character names to each audio file.
+
+    If a :class:`GameProfile` is supplied the function will use previously
+    stored character names as suggestions and update the profile with any
+    new mappings provided by the user.
+    """
+
+    console.print(
+        "\nAssign character names to files. Press Enter to accept the suggested name in [brackets]."
+    )
     mapping: Dict[str, str] = {}
     for path in files:
         base = os.path.basename(path)
-        suggested = derive_suggested_label(base)
+        display = os.path.splitext(base)[0]
+        suggested = None
+        if profile is not None:
+            suggested = profile.get_character(display)
+        if not suggested:
+            suggested = derive_suggested_label(base)
         reply = console.input(f"  {base} -> [bold][{suggested}][/bold]: ")
         name = reply.strip() or suggested
         mapping[base.lower()] = name
+        if profile is not None:
+            profile.set_player(display, name)
     console.print("")
     return mapping
 
@@ -111,7 +128,7 @@ def build_options(args: argparse.Namespace) -> TranscriptionOptions:
     )
 
 
-def main() -> None:
+def main(profile: Optional[GameProfile] = None) -> Dict[str, str]:
     ap = argparse.ArgumentParser(description="Parallel multitrack transcription with Rich progress bars, filename timestamp alignment, and speaker prompts.")
     ap.add_argument("--model", default="small")
     ap.add_argument("--lang", default="en")
@@ -165,9 +182,12 @@ def main() -> None:
                 console.print(f"  {name} -> +{off:.3f}s")
 
     if args.no_prompt:
-        speakers = {os.path.basename(p).lower(): derive_suggested_label(os.path.basename(p)) for p in files}
+        speakers = {
+            os.path.basename(p).lower(): derive_suggested_label(os.path.basename(p))
+            for p in files
+        }
     else:
-        speakers = prompt_speaker_names(files)
+        speakers = prompt_speaker_names(files, profile)
 
     console.print(f"Processing {len(files)} file(s) with up to {args.workers or 'auto'} parallel worker(s)…")
 
@@ -185,6 +205,7 @@ def main() -> None:
         )
 
     console.print(f"\nAll done. Outputs -> {args.out}.txt / .srt / {args.out}.json")
+    return speakers
 
 
 if __name__ == "__main__":

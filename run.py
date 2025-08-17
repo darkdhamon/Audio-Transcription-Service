@@ -164,7 +164,13 @@ def main() -> None:
 
     from cli.app import main as cli_main
 
-    cli_main()
+    _ = cli_main(profile)
+
+    # Persist any updated character mappings to the game profile.
+    settings_path = root / GAME_FILE
+    settings = GameSettings.load(settings_path)
+    settings.profiles[profile_name] = profile
+    settings.save(settings_path)
 
 
 if __name__ == "__main__":
