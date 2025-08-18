@@ -142,6 +142,8 @@ def build_options(args: argparse.Namespace) -> TranscriptionOptions:
         squelch_max_dur=args.squelch_max_dur,
         junk_words=[w.strip().lower() for w in args.junk_words.split(',') if w.strip()],
         skip_existing=args.skip_existing,
+        # Select the transcription backend engine
+        engine=args.engine,
     )
 
 
@@ -169,6 +171,12 @@ def main(profile: Optional[GameProfile] = None) -> Dict[str, str]:
     ap.add_argument("--squelch-max-dur", type=float, default=1.2)
     ap.add_argument("--junk-words", default="you,ya,yeah,uh,huh,mm,hmm")
     ap.add_argument("--skip-existing", action="store_true")
+    ap.add_argument(
+        "--engine",
+        choices=["faster-whisper", "whisperx"],
+        default="faster-whisper",
+        help="Transcription engine to use",
+    )
 
     args = ap.parse_args()
 
