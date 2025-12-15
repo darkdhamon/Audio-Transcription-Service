@@ -1,0 +1,7 @@
+# Core dependencies for the audio transcription CLI and GUI.
+# Install these before running `run.py` or the Tkinter interface.
+rich>=13.0
+# Default backend selected by the application.
+faster-whisper
+# Optional alternative backend that can be selected from the UI/CLI.
+whisperx

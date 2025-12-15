@@ -18,6 +18,16 @@ Set-ExecutionPolicy Bypass -Scope Process -Force
 
 After completion, WhisperX will be available for transcribing audio files.
 
+## Install Python dependencies
+
+If you already have Python available, install the required packages with:
+
+```bash
+python -m pip install -r requirements.txt
+```
+
+This installs the Rich console helper along with both Whisper backends (`faster-whisper` by default and `whisperx` as an optional alternative) so the CLI and GUI can import their dependencies successfully.
+
 ## Running the application
 
 Once dependencies are installed, launch the transcription CLI with:
@@ -33,3 +43,14 @@ On Windows you can also use the `start.ps1` script, which simply launches the ap
 ```powershell
 ./start.ps1
 ```
+
+## Graphical user interface
+
+A Tkinter-based GUI is available for users who prefer not to run the CLI. Launch it from the repository root after adding `src` to your `PYTHONPATH`:
+
+```bash
+export PYTHONPATH=src
+python -m gui_app.app
+```
+
+The GUI lets you choose the input folder, output base name, model, language, and engine, and it reports progress for each file as transcription runs.
