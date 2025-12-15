@@ -18,6 +18,16 @@ Set-ExecutionPolicy Bypass -Scope Process -Force
 
 After completion, WhisperX will be available for transcribing audio files.
 
+## Install Python dependencies
+
+If you already have Python available, install the required packages with:
+
+```bash
+python -m pip install -r requirements.txt
+```
+
+This installs the Rich console helper along with both Whisper backends (`faster-whisper` by default and `whisperx` as an optional alternative) so the CLI and GUI can import their dependencies successfully.
+
 ## Running the application
 
 Once dependencies are installed, launch the transcription CLI with:
