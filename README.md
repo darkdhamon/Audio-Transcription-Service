@@ -33,3 +33,14 @@ On Windows you can also use the `start.ps1` script, which simply launches the ap
 ```powershell
 ./start.ps1
 ```
+
+## Graphical user interface
+
+A Tkinter-based GUI is available for users who prefer not to run the CLI. Launch it from the repository root after adding `src` to your `PYTHONPATH`:
+
+```bash
+export PYTHONPATH=src
+python -m gui_app.app
+```
+
+The GUI lets you choose the input folder, output base name, model, language, and engine, and it reports progress for each file as transcription runs.
