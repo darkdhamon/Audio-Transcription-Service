@@ -155,7 +155,19 @@ def main(profile: Optional[GameProfile] = None) -> Dict[str, str]:
     ap.add_argument("--out", default="rpg_transcript")
     ap.add_argument("--beam", type=int, default=5)
     ap.add_argument("--temperature", type=float, default=0.2, help="Decoding temperature (0.0=deterministic)")
-    ap.add_argument("--vad", action="store_true")
+    ap.add_argument(
+        "--vad",
+        dest="vad",
+        action="store_true",
+        help="Enable voice activity detection (default).",
+    )
+    ap.add_argument(
+        "--no-vad",
+        dest="vad",
+        action="store_false",
+        help="Disable voice activity detection.",
+    )
+    ap.set_defaults(vad=True)
     ap.add_argument("--vad-threshold", type=float, default=None)
     ap.add_argument("--min-speech-ms", type=int, default=None)
     ap.add_argument("--min-silence-ms", type=int, default=None)

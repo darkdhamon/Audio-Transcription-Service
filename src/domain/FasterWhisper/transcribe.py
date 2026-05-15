@@ -57,7 +57,9 @@ def transcribe(
         language=options.lang
         if options.model not in ("large", "large-v2", "large-v3")
         else None,
-        vad_filter=bool(vad_params),
+        # ``options.vad`` enables the backend's default VAD even when the
+        # caller did not supply custom VAD thresholds.
+        vad_filter=options.vad,
         beam_size=options.beam,
         temperature=options.temperature,
     )

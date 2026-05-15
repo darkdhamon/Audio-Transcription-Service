@@ -36,7 +36,7 @@ class TranscriptionOptions:
     lang: str = "en"
     beam: int = 5
     temperature: float = 0.2
-    vad: bool = False
+    vad: bool = True
     vad_threshold: Optional[float] = None
     min_speech_ms: Optional[int] = None
     min_silence_ms: Optional[int] = None
@@ -194,7 +194,9 @@ def build_vad_parameters(opts: TranscriptionOptions) -> Optional[dict]:
         params["min_silence_duration_ms"] = opts.min_silence_ms
     if opts.speech_pad_ms is not None:
         params["speech_pad_ms"] = opts.speech_pad_ms
-    return params or None
+    # Return an empty dict when VAD is enabled without custom thresholds so
+    # backends can still turn on their default voice activity detection.
+    return params
 
 
 def is_junk(seg: Dict, max_dur: float, junk_words: set) -> bool:
@@ -329,7 +331,7 @@ def run_parallel(
             progress_callback(msg)
 
         if msg and msg.get("type") in ("done", "skipped"):
-            if msg["type"] == "done":
+            if msg["type"] in ("done", "skipped"):
                 finished_parts.append(msg["part"])
             file = msg["file"]
             for i, (f, proc) in enumerate(active):
