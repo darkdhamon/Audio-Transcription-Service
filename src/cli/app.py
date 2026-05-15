@@ -44,7 +44,7 @@ class RichProgressHandler:
             BarColumn(),
             TextColumn("{task.percentage:>5.1f}%"),
             TimeElapsedColumn(),
-            TextColumn("• ETA:"),
+            TextColumn("ETA:"),
             TimeRemainingColumn(),
             console=console,
             transient=False,
@@ -78,7 +78,9 @@ class RichProgressHandler:
             path = Path(msg["file"])
             task = self.task_by_file.get(path)
             if task is not None:
-                self.progress.update(task, advance=0)
+                task_info = self.progress.tasks[task]
+                total = task_info.total if task_info.total is not None else task_info.completed
+                self.progress.update(task, completed=total)
                 self.progress.stop_task(task)
 
 
@@ -267,7 +269,7 @@ def main(profile: Optional[GameProfile] = None) -> Dict[str, str]:
         speakers = prompt_speaker_names(files, profile)
 
     console.print(
-        f"Processing {len(files)} file(s) with up to {args.workers or 'auto'} parallel worker(s)…"
+        f"Processing {len(files)} file(s) with up to {args.workers or 'auto'} parallel worker(s)..."
     )
 
     with RichProgressHandler() as progress:

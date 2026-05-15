@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Dict, List, Optional, TYPE_CHECKING
 
 if TYPE_CHECKING:  # pragma: no cover - imported for type hints only
-    from domain.transcription import TranscriptionOptions
+    from domain.transcription import ProgressReporter, TranscriptionOptions
 
 
 def transcribe(
@@ -14,6 +14,7 @@ def transcribe(
     vad_params: Optional[dict],
     offset: float,
     speaker_label: str,
+    progress_callback: Optional["ProgressReporter"] = None,
 ) -> List[Dict]:
     """Transcribe ``audio_path`` using ``faster-whisper`` and return segments.
 
@@ -31,6 +32,9 @@ def transcribe(
         Time offset in seconds applied to every returned segment.
     speaker_label:
         Label to associate with the speaker for all emitted segments.
+    progress_callback:
+        Optional callback that receives file-relative decode progress in
+        seconds as segments become available from ``faster-whisper``.
 
     Returns
     -------
@@ -74,8 +78,12 @@ def transcribe(
 
     formatted: List[Dict] = []
     for seg in segments:
-        start = float(getattr(seg, "start", 0.0)) + offset
-        end = float(getattr(seg, "end", 0.0)) + offset
+        start_seconds = float(getattr(seg, "start", 0.0))
+        end_seconds = float(getattr(seg, "end", 0.0))
+        if progress_callback is not None:
+            progress_callback(end_seconds)
+        start = start_seconds + offset
+        end = end_seconds + offset
         text = getattr(seg, "text", "").strip()
         formatted.append(
             {"start": start, "end": end, "text": text, "speaker": speaker_label}

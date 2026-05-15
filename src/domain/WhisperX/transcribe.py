@@ -12,7 +12,7 @@ and returns a normalized list of transcription segments.
 from typing import Dict, List, Optional, TYPE_CHECKING
 
 if TYPE_CHECKING:  # pragma: no cover - used only for type hints
-    from domain.transcription import TranscriptionOptions
+    from domain.transcription import ProgressReporter, TranscriptionOptions
 
 
 def transcribe(
@@ -21,6 +21,7 @@ def transcribe(
     vad_params: Optional[dict],
     offset: float,
     speaker_label: str,
+    progress_callback: Optional["ProgressReporter"] = None,
 ) -> List[Dict]:
     """Transcribe ``audio_path`` using WhisperX and return speech segments.
 
@@ -38,6 +39,10 @@ def transcribe(
         Time offset in seconds applied to every returned segment.
     speaker_label:
         Label to associate with the speaker for all emitted segments.
+    progress_callback:
+        Optional callback that receives file-relative progress in seconds.
+        WhisperX does not stream segments as early as FasterWhisper, but the
+        callback still lets the caller observe segment timing once available.
 
     Returns
     -------
@@ -97,8 +102,12 @@ def transcribe(
 
     formatted: List[Dict] = []
     for seg in segments:
-        start = float(seg.get("start", 0.0)) + offset
-        end = float(seg.get("end", 0.0)) + offset
+        start_seconds = float(seg.get("start", 0.0))
+        end_seconds = float(seg.get("end", 0.0))
+        if progress_callback is not None:
+            progress_callback(end_seconds)
+        start = start_seconds + offset
+        end = end_seconds + offset
         text = seg.get("text", "").strip()
         formatted.append(
             {"start": start, "end": end, "text": text, "speaker": speaker_label}

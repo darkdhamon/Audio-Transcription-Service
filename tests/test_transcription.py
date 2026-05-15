@@ -8,6 +8,7 @@ segment de-duplication, repeat collapsing, and merging output parts.
 from datetime import datetime, timezone
 from pathlib import Path
 import json
+import queue
 import sys
 import types
 
@@ -26,6 +27,7 @@ from domain.transcription import (
     dedupe_consecutive,
     filename_offsets,
     parse_ts_from_name,
+    worker_transcribe,
 )
 
 
@@ -257,6 +259,106 @@ class TestVadConfiguration:
         ]
         assert captured_kwargs["vad_filter"] is True
         assert "vad_parameters" not in captured_kwargs
+
+    def test_faster_whisper_reports_segment_progress(self, monkeypatch) -> None:
+        """The FasterWhisper backend should stream segment end times as progress."""
+
+        from domain.FasterWhisper import transcribe as faster_whisper_transcribe
+
+        class FakeSegment:
+            def __init__(self, start: float, end: float, text: str) -> None:
+                self.start = start
+                self.end = end
+                self.text = text
+
+        class FakeWhisperModel:
+            def __init__(self, *_args, **_kwargs) -> None:
+                pass
+
+            def transcribe(self, _audio_path: str, **_kwargs):
+                return [
+                    FakeSegment(0.0, 1.5, "hello"),
+                    FakeSegment(1.5, 3.0, "there"),
+                ], object()
+
+        monkeypatch.setitem(
+            sys.modules,
+            "faster_whisper",
+            types.SimpleNamespace(WhisperModel=FakeWhisperModel),
+        )
+
+        progress_positions: List[float] = []
+        result = faster_whisper_transcribe.transcribe(
+            "audio.wav",
+            TranscriptionOptions(vad=True),
+            {},
+            0.0,
+            "Speaker",
+            progress_callback=progress_positions.append,
+        )
+
+        assert progress_positions == [1.5, 3.0]
+        assert result == [
+            {"start": 0.0, "end": 1.5, "text": "hello", "speaker": "Speaker"},
+            {"start": 1.5, "end": 3.0, "text": "there", "speaker": "Speaker"},
+        ]
+
+
+class TestWorkerProgress:
+    """Ensure worker processes forward streamed backend progress."""
+
+    def test_worker_transcribe_emits_progress_updates(self, monkeypatch, tmp_path: Path) -> None:
+        """Streaming backend progress should reach the parent queue for ETA updates."""
+
+        from domain import transcription
+
+        audio_file = tmp_path / "speaker.wav"
+        audio_file.write_text("dummy")
+        monkeypatch.setattr(transcription, "get_duration_seconds", lambda _path: 10.0)
+
+        tick_values = iter([1.0, 1.3])
+        monkeypatch.setattr(transcription.time, "time", lambda: next(tick_values))
+
+        def fake_transcribe(
+            audio_path: str,
+            options: TranscriptionOptions,
+            vad_params: Dict,
+            offset: float,
+            speaker_label: str,
+            progress_callback,
+        ) -> List[Dict]:
+            progress_callback(2.5)
+            progress_callback(6.0)
+            return [
+                {"start": offset + 0.0, "end": offset + 2.5, "text": "hello", "speaker": speaker_label},
+                {"start": offset + 2.5, "end": offset + 6.0, "text": "there", "speaker": speaker_label},
+            ]
+
+        progress_queue: "queue.Queue[Dict]" = queue.Queue()
+        worker_transcribe(
+            str(audio_file),
+            TranscriptionOptions(),
+            {},
+            0.0,
+            0,
+            progress_queue,
+            "Speaker",
+            fake_transcribe,
+        )
+
+        messages = [progress_queue.get(timeout=1) for _ in range(5)]
+        assert [message["type"] for message in messages] == [
+            "start",
+            "progress",
+            "progress",
+            "progress",
+            "done",
+        ]
+        assert [message["pos"] for message in messages if message["type"] == "progress"] == [
+            2.5,
+            6.0,
+            10.0,
+        ]
 
 
 class TestEngineSelection:

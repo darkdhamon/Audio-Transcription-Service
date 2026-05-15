@@ -30,6 +30,15 @@ TS_RE = re.compile(r"(20\d{2}-\d{2}-\d{2})_(\d{2}-\d{2}-\d{2})(?:\.(\d{3,6}))?")
 logger = logging.getLogger(__name__)
 
 
+# Backends return normalized segments and may optionally stream intermediate
+# decode progress as file-relative seconds through the callback argument.
+ProgressReporter = Callable[[float], None]
+BackendTranscribe = Callable[
+    [str, "TranscriptionOptions", Optional[dict], float, str, Optional[ProgressReporter]],
+    List[Dict],
+]
+
+
 @dataclass
 class TranscriptionOptions:
     """Options that control the transcription process."""
@@ -225,7 +234,7 @@ def worker_transcribe(
     cpu_threads: int,
     prog_q: Queue,
     speaker_label: str,
-    transcribe_fn: Callable[[str, TranscriptionOptions, Optional[dict], float, str], List[Dict]],
+    transcribe_fn: BackendTranscribe,
 ) -> None:
     part_json = file_path + ".json.part"
     if options.skip_existing and os.path.exists(part_json):
@@ -241,16 +250,37 @@ def worker_transcribe(
     prog_q.put(
         {"type": "start", "file": file_path, "speaker": speaker_label, "duration": duration}
     )
+
+    def report_progress(position: float) -> None:
+        """Throttle progress updates so the parent process can estimate ETA."""
+
+        nonlocal last_emit
+        bounded_position = max(0.0, min(duration, float(position))) if duration > 0 else max(
+            0.0, float(position)
+        )
+        now = time.time()
+        if duration > 0 and now - last_emit > 0.25:
+            prog_q.put(
+                {
+                    "type": "progress",
+                    "file": file_path,
+                    "pos": bounded_position,
+                    "duration": duration,
+                }
+            )
+            last_emit = now
+
+    out: List[Dict] = []
+    last_emit = 0.0
     segments = transcribe_fn(
         audio_path=file_path,
         options=options,
         vad_params=vad_params,
         offset=offset,
         speaker_label=speaker_label,
+        progress_callback=report_progress,
     )
 
-    out: List[Dict] = []
-    last_emit = 0.0
     junk = set(options.junk_words or [])
 
     for seg in segments:
@@ -259,17 +289,8 @@ def worker_transcribe(
 
         out.append(seg)
 
-        now = time.time()
-        if duration > 0 and now - last_emit > 0.25:
-            prog_q.put(
-                {
-                    "type": "progress",
-                    "file": file_path,
-                    "pos": max(0.0, seg["end"]),
-                    "duration": duration,
-                }
-            )
-            last_emit = now
+    if duration > 0:
+        prog_q.put({"type": "progress", "file": file_path, "pos": duration, "duration": duration})
 
     with open(part_json, "w", encoding="utf-8") as f:
         json.dump(out, f, ensure_ascii=False, indent=2)
