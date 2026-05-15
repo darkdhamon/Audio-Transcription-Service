@@ -22,7 +22,6 @@ interactive session/profile selection flow.
 
 from __future__ import annotations
 
-from datetime import datetime
 from pathlib import Path
 import sys
 
@@ -34,21 +33,11 @@ from rich.console import Console
 
 from cli.app import main as cli_main
 from domain.config import AppSettings, GameProfile, GameSettings, JsonConfigStore, LastSession
+from domain.launcher import SessionCatalog, looks_like_session_directory
 
 CONFIG_FILE = "appsettings.json"
 GAME_FILE = "gamesettings.json"
 LAST_SESSION_FILE = "lastsession.json"
-AUDIO_EXTENSIONS = {
-    ".aac",
-    ".flac",
-    ".m4a",
-    ".mp3",
-    ".ogg",
-    ".opus",
-    ".wav",
-    ".webm",
-    ".wma",
-}
 
 
 def should_launch_cli_directly(argv: list[str]) -> bool:
@@ -73,16 +62,7 @@ def is_recording_session_dir(path: Path) -> bool:
     ``transcript`` or ``.qodo`` as if they were separate sessions.
     """
 
-    if not path.is_dir():
-        return False
-
-    try:
-        return any(
-            child.is_file() and child.suffix.lower() in AUDIO_EXTENSIONS
-            for child in path.iterdir()
-        )
-    except OSError:
-        return False
+    return looks_like_session_directory(path)
 
 
 def confirm_saved_recording_directory(recording_dir: Path, console: Console) -> bool:
@@ -139,43 +119,38 @@ def choose_session(
     without typing a number selects the newest session automatically.
     """
 
-    sessions = [p for p in recordings_dir.iterdir() if p.is_dir()]
+    catalog = SessionCatalog.discover(recordings_dir)
+    sessions = catalog.sessions
     if not sessions:
         console.print("No session directories found.")
         raise SystemExit(1)
 
-    sessions.sort(key=lambda p: p.stat().st_mtime, reverse=True)
-
     # Reuse the last successful session only when the user explicitly confirms
     # it, which avoids silently pointing a new transcript at the wrong folder.
-    last_session = next(
-        (session for session in sessions if session.name == last_session_name),
-        None,
-    )
+    last_session = catalog.find_by_name(last_session_name)
     if last_session is not None:
         while True:
             reply = console.input(
                 f'Use last recording session "{last_session.name}"? [Y/n]: '
             ).strip().lower()
             if reply in {"", "y", "yes"}:
-                return last_session
+                return last_session.path
             if reply in {"n", "no"}:
                 break
             console.print("Please answer Y or N.")
 
     console.print("\nSessions:")
     for idx, sess in enumerate(sessions, 1):
-        stamp = datetime.fromtimestamp(sess.stat().st_mtime).strftime("%Y-%m-%d %H:%M")
-        console.print(f"  {idx}. {sess.name} ({stamp})")
+        console.print(f"  {idx}. {sess.name} ({sess.modified_label})")
 
     while True:
         choice = console.input("Select session number [1]: ").strip()
         if not choice:
-            return sessions[0]
+            return sessions[0].path
         if choice.isdigit():
             idx = int(choice)
             if 1 <= idx <= len(sessions):
-                return sessions[idx - 1]
+                return sessions[idx - 1].path
         console.print("Invalid selection.")
 
 

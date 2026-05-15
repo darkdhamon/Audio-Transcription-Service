@@ -43,6 +43,36 @@ On Windows you can also use the `start.ps1` script, which simply launches the ap
 ./start.ps1
 ```
 
+## GUI preview
+
+The repository now also includes an early Tkinter-based desktop GUI that uses
+the same transcription service as the CLI. It is intentionally separate from
+`run.py`, so the command-line flow keeps working exactly as before.
+
+Launch the GUI with:
+
+```bash
+python run_gui.py
+```
+
+Or on Windows:
+
+```powershell
+./start-gui.ps1
+```
+
+The current GUI preview supports:
+
+- Choosing a recordings directory or a direct session folder
+- Picking a session from the discovered list
+- Selecting or typing a game profile and campaign name
+- Editing the suggested speaker names for each audio file
+- Previewing the resolved runtime, model, and backend
+- Running a transcription job in the background with per-file progress updates
+
+The CLI remains the most complete surface today, but the GUI now provides a
+desktop entry point without changing the command-line behavior.
+
 To inspect what the app would choose on the current machine without starting a transcription run:
 
 ```bash
