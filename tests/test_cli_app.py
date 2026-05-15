@@ -4,10 +4,12 @@ from pathlib import Path
 import sys
 import argparse
 
+from rich.console import Console
+
 # Ensure the ``src`` package is importable when running tests directly.
 sys.path.append(str(Path(__file__).resolve().parents[1] / "src"))
 
-from cli.app import build_options
+from cli.app import build_options, format_runtime_summary
 
 
 def test_build_options_engine() -> None:
@@ -38,4 +40,21 @@ def test_build_options_engine() -> None:
     assert opts.engine == "whisperx"
     assert opts.device == "cuda"
     assert opts.compute_type == "float16"
+
+
+def test_format_runtime_summary_renders_plain_text() -> None:
+    """The runtime summary should render literal values in terminal output."""
+
+    console = Console(record=True, width=200, color_system=None)
+    console.print(
+        format_runtime_summary(
+            "engine=faster-whisper, model=small, device=cpu, compute_type=int8"
+        ),
+        highlight=False,
+    )
+
+    assert (
+        console.export_text().strip()
+        == "Runtime: engine=faster-whisper, model=small, device=cpu, compute_type=int8"
+    )
 

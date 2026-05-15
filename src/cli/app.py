@@ -21,6 +21,7 @@ from rich.progress import (
     TimeRemainingColumn,
     SpinnerColumn,
 )
+from rich.text import Text
 
 from domain.transcription import (
     TranscriptionOptions,
@@ -32,6 +33,14 @@ from domain.transcription import (
 from domain.config import GameProfile
 
 console = Console()
+
+
+def format_runtime_summary(runtime_description: str) -> Text:
+    """Build a plain-text runtime summary with predictable Rich rendering."""
+
+    summary = Text("Runtime: ", style="dim")
+    summary.append(runtime_description)
+    return summary
 
 
 class RichProgressHandler:
@@ -227,7 +236,7 @@ def main(profile: Optional[GameProfile] = None) -> Dict[str, str]:
     runtime = service.resolve_runtime()
     hardware = service.detect_hardware()
 
-    console.print(f"[dim]Runtime:[/dim] {runtime.describe()}")
+    console.print(format_runtime_summary(runtime.describe()), highlight=False)
     if hardware and hardware.gpu_names:
         console.print(f"[dim]Detected GPUs:[/dim] {', '.join(hardware.gpu_names)}")
     else:
