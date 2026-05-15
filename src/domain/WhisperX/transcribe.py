@@ -53,13 +53,16 @@ def transcribe(
             "The 'whisperx' package is required. Install it with 'pip install whisperx'."
         ) from exc
 
-    # Load the WhisperX model on CPU using an int8 compute type to reduce
-    # memory usage.  ``cpu_threads`` is sourced from the options dataclass to
-    # keep configuration centralized.
+    resolved_model = options.resolved_model or options.model
+    resolved_device = options.resolved_device or "cpu"
+    resolved_compute_type = options.resolved_compute_type or "int8"
+
+    # Load the WhisperX model using the resolved runtime selection so the same
+    # code path can use either CPU inference or NVIDIA CUDA acceleration.
     model = whisperx.load_model(
-        options.model,
-        device="cpu",
-        compute_type="int8",
+        resolved_model,
+        device=resolved_device,
+        compute_type=resolved_compute_type,
         cpu_threads=options.cpu_threads or 0,
     )
 
@@ -68,7 +71,7 @@ def transcribe(
     # smaller multilingual models.
     transcribe_kwargs: Dict = {
         "language": options.lang
-        if options.model not in ("large", "large-v2", "large-v3")
+        if resolved_model not in ("large", "large-v2", "large-v3")
         else None
     }
     if vad_params:
@@ -83,7 +86,7 @@ def transcribe(
     # segment timings.
     try:
         align_model, metadata = whisperx.load_align_model(
-            language=options.lang, device="cpu"
+            language=options.lang, device=resolved_device
         )
         aligned = whisperx.align(
             segments, align_model, metadata, audio_path, return_char_alignments=False

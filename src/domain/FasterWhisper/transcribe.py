@@ -46,18 +46,24 @@ def transcribe(
             "The 'faster-whisper' package is required. Install it with 'pip install faster-whisper'."
         ) from exc
 
+    resolved_model = options.resolved_model or options.model
+    resolved_device = options.resolved_device or "cpu"
+    resolved_compute_type = options.resolved_compute_type or "int8"
+
     model = WhisperModel(
-        options.model,
-        device="cpu",
-        compute_type="int8",
+        resolved_model,
+        device=resolved_device,
+        compute_type=resolved_compute_type,
         cpu_threads=options.cpu_threads or 0,
     )
 
     transcribe_kwargs: Dict = dict(
         language=options.lang
-        if options.model not in ("large", "large-v2", "large-v3")
+        if resolved_model not in ("large", "large-v2", "large-v3")
         else None,
-        vad_filter=bool(vad_params),
+        # ``options.vad`` enables the backend's default VAD even when the
+        # caller did not supply custom VAD thresholds.
+        vad_filter=options.vad,
         beam_size=options.beam,
         temperature=options.temperature,
     )

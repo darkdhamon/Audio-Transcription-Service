@@ -11,7 +11,7 @@ from cli.app import build_options
 
 
 def test_build_options_engine() -> None:
-    """Passing ``--engine`` should populate ``TranscriptionOptions.engine``."""
+    """CLI arguments should populate runtime-related transcription options."""
 
     # Construct a minimal namespace resembling parsed CLI arguments.
     args = argparse.Namespace(
@@ -25,6 +25,8 @@ def test_build_options_engine() -> None:
         min_silence_ms=None,
         speech_pad_ms=None,
         cpu_threads=0,
+        device="cuda",
+        compute_type="float16",
         squelch=False,
         squelch_max_dur=1.2,
         junk_words="",
@@ -34,4 +36,6 @@ def test_build_options_engine() -> None:
 
     opts = build_options(args)
     assert opts.engine == "whisperx"
+    assert opts.device == "cuda"
+    assert opts.compute_type == "float16"
 

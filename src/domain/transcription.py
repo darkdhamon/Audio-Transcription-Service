@@ -8,7 +8,7 @@ independent from any particular user interface.  A CLI, GUI or web
 front-end can drive the functions here without modification.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from multiprocessing import Process, Queue, cpu_count
 from pathlib import Path
@@ -22,6 +22,8 @@ import subprocess
 import time
 import unicodedata
 
+from domain.runtime import HardwareProfile, RuntimeSelection, resolve_runtime_selection
+
 AUDIO_EXTS = (".wav", ".mp3", ".m4a", ".flac", ".ogg", ".aac")
 TS_RE = re.compile(r"(20\d{2}-\d{2}-\d{2})_(\d{2}-\d{2}-\d{2})(?:\.(\d{3,6}))?")
 
@@ -32,11 +34,11 @@ logger = logging.getLogger(__name__)
 class TranscriptionOptions:
     """Options that control the transcription process."""
 
-    model: str = "small"
+    model: str = "auto"
     lang: str = "en"
     beam: int = 5
     temperature: float = 0.2
-    vad: bool = False
+    vad: bool = True
     vad_threshold: Optional[float] = None
     min_speech_ms: Optional[int] = None
     min_silence_ms: Optional[int] = None
@@ -46,7 +48,15 @@ class TranscriptionOptions:
     squelch_max_dur: float = 1.2
     junk_words: Optional[List[str]] = None
     skip_existing: bool = False
+    device: Literal["auto", "cpu", "cuda"] = "auto"
+    compute_type: Literal["auto", "int8", "int8_float16", "float16", "float32"] = "auto"
     engine: Literal["faster-whisper", "whisperx"] = "faster-whisper"
+    # These fields are filled in once runtime detection selects the most
+    # compatible execution path for the current machine.
+    resolved_model: Optional[str] = None
+    resolved_device: Optional[Literal["cpu", "cuda"]] = None
+    resolved_compute_type: Optional[str] = None
+    runtime_notes: List[str] = field(default_factory=list)
 
 
 def parse_ts_from_name(name: str) -> Optional[float]:
@@ -194,7 +204,9 @@ def build_vad_parameters(opts: TranscriptionOptions) -> Optional[dict]:
         params["min_silence_duration_ms"] = opts.min_silence_ms
     if opts.speech_pad_ms is not None:
         params["speech_pad_ms"] = opts.speech_pad_ms
-    return params or None
+    # Return an empty dict when VAD is enabled without custom thresholds so
+    # backends can still turn on their default voice activity detection.
+    return params
 
 
 def is_junk(seg: Dict, max_dur: float, junk_words: set) -> bool:
@@ -329,7 +341,7 @@ def run_parallel(
             progress_callback(msg)
 
         if msg and msg.get("type") in ("done", "skipped"):
-            if msg["type"] == "done":
+            if msg["type"] in ("done", "skipped"):
                 finished_parts.append(msg["part"])
             file = msg["file"]
             for i, (f, proc) in enumerate(active):
@@ -420,6 +432,29 @@ class TranscriptionService:
 
     def __init__(self, options: TranscriptionOptions) -> None:
         self.options = options
+        self._runtime: Optional[RuntimeSelection] = None
+
+    def resolve_runtime(self) -> RuntimeSelection:
+        """Resolve hardware-aware execution settings for the current options."""
+
+        if self._runtime is None:
+            runtime = resolve_runtime_selection(self.options)
+            self.options.resolved_model = runtime.model
+            self.options.resolved_device = runtime.device
+            self.options.resolved_compute_type = runtime.compute_type
+            self.options.runtime_notes = list(runtime.notes)
+            self._runtime = runtime
+        return self._runtime
+
+    def detect_hardware(self) -> Optional[HardwareProfile]:
+        """Return the detected hardware profile after runtime resolution."""
+
+        return self.resolve_runtime().hardware
+
+    def describe_runtime(self) -> str:
+        """Return a compact human-readable summary of the resolved runtime."""
+
+        return self.resolve_runtime().describe()
 
     def validate_dependencies(self) -> None:
         """Ensure required external tools and libraries are available.
@@ -430,6 +465,8 @@ class TranscriptionService:
             If ``faster-whisper`` or ``ffprobe`` is missing from the
             environment.
         """
+
+        _ = self.resolve_runtime()
 
         try:  # Verify Python package is installed
             if self.options.engine == "whisperx":
