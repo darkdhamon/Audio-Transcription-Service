@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 import json
 import sys
+import types
 
 import pytest
 from typing import Dict, List
@@ -20,6 +21,7 @@ sys.path.append(str(Path(__file__).resolve().parents[1] / "src"))
 from domain.transcription import (
     TranscriptionOptions,
     TranscriptionService,
+    build_vad_parameters,
     collapse_nearby_repeats,
     dedupe_consecutive,
     filename_offsets,
@@ -39,10 +41,10 @@ def dummy_worker(
 ) -> None:
     """Lightweight stand-in for ``worker_transcribe`` used in tests.
 
-    The worker immediately reports completion and includes the ``id`` of the
-    VAD parameters so tests can verify parameter reuse across processes.  It
-    also records which backend was requested by reporting the module name of
-    ``transcribe_fn``.
+    The worker immediately reports completion and includes a copy of the VAD
+    parameters so tests can verify that every worker receives the same cached
+    configuration. It also records which backend was requested by reporting
+    the module name of ``transcribe_fn``.
     """
 
     prog_q.put(
@@ -50,7 +52,7 @@ def dummy_worker(
             "type": "done",
             "file": file_path,
             "part": file_path + ".json.part",
-            "vp_id": id(vad_params),
+            "vad_params": dict(vad_params or {}),
             "backend": getattr(transcribe_fn, "__module__", ""),
         }
     )
@@ -186,11 +188,11 @@ class TestRunParallelCaching:
         monkeypatch.setattr(transcription, "worker_transcribe", dummy_worker)
 
         options = transcription.TranscriptionOptions(vad=True)
-        vp_ids: List[int] = []
+        received_vad_params: List[Dict] = []
 
         def progress(msg: Dict) -> None:
             if msg.get("type") == "done":
-                vp_ids.append(msg["vp_id"])
+                received_vad_params.append(msg["vad_params"])
 
         files = [str(tmp_path / "a.wav"), str(tmp_path / "b.wav")]
         transcription.run_parallel(
@@ -203,7 +205,58 @@ class TestRunParallelCaching:
         )
 
         assert call_count == 1
-        assert len(set(vp_ids)) == 1
+        assert received_vad_params == [{"foo": "bar"}, {"foo": "bar"}]
+
+
+class TestVadConfiguration:
+    """Ensure VAD configuration is passed through correctly."""
+
+    def test_build_vad_parameters_returns_empty_dict_when_enabled(self) -> None:
+        """Plain ``--vad`` should still enable backend-default VAD behavior."""
+
+        assert build_vad_parameters(TranscriptionOptions(vad=True)) == {}
+
+    def test_faster_whisper_enables_default_vad_without_custom_params(
+        self, monkeypatch
+    ) -> None:
+        """The FasterWhisper backend should enable VAD with default settings."""
+
+        from domain.FasterWhisper import transcribe as faster_whisper_transcribe
+
+        captured_kwargs: Dict = {}
+
+        class FakeSegment:
+            start = 0.0
+            end = 1.0
+            text = "hello"
+
+        class FakeWhisperModel:
+            def __init__(self, *_args, **_kwargs) -> None:
+                pass
+
+            def transcribe(self, _audio_path: str, **kwargs):
+                captured_kwargs.update(kwargs)
+                return [FakeSegment()], object()
+
+        monkeypatch.setitem(
+            sys.modules,
+            "faster_whisper",
+            types.SimpleNamespace(WhisperModel=FakeWhisperModel),
+        )
+
+        result = faster_whisper_transcribe.transcribe(
+            "audio.wav",
+            TranscriptionOptions(vad=True),
+            {},
+            0.0,
+            "Speaker",
+        )
+
+        assert result == [
+            {"start": 0.0, "end": 1.0, "text": "hello", "speaker": "Speaker"}
+        ]
+        assert captured_kwargs["vad_filter"] is True
+        assert "vad_parameters" not in captured_kwargs
 
 
 class TestEngineSelection:
@@ -247,3 +300,32 @@ class TestEngineSelection:
             progress_callback=progress,
         )
         assert backends == ["domain.FasterWhisper.transcribe"]
+
+
+class TestSkipExisting:
+    """Ensure cached part files still participate in the final merge."""
+
+    def test_run_parallel_returns_skipped_part_files(self, tmp_path: Path) -> None:
+        """Skipped cached parts should be returned for downstream merging."""
+
+        from domain import transcription
+
+        audio_one = tmp_path / "speaker_one.wav"
+        audio_two = tmp_path / "speaker_two.wav"
+        audio_one.write_text("dummy")
+        audio_two.write_text("dummy")
+
+        part_one = tmp_path / "speaker_one.wav.json.part"
+        part_two = tmp_path / "speaker_two.wav.json.part"
+        part_one.write_text("[]")
+        part_two.write_text("[]")
+
+        parts = transcription.run_parallel(
+            [str(audio_one), str(audio_two)],
+            workers=2,
+            speakers={},
+            offsets={},
+            options=transcription.TranscriptionOptions(skip_existing=True),
+        )
+
+        assert set(parts) == {str(part_one), str(part_two)}
