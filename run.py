@@ -3,74 +3,83 @@
 
 Running this script adds the ``src`` directory to ``sys.path`` so that the
 CLI can be executed without manual environment setup. This allows the
-application to be started with a single double‑click or by running
+application to be started with a single double-click or by running
 ``python run.py`` from the repository root.
 
 On first launch the script prompts for the location of the recordings
-directory and stores it in ``appsettings.json``. Session folders inside the
-recordings directory are listed in order of most recent activity and the user
-is asked to choose one. Pressing :kbd:`Enter` without a choice selects the
-most recent session. Afterward the user selects or creates a game profile and
-the transcript is written to ``<session>/transcript/<CampaignName>Transcript``.
+directory and stores it in ``appsettings.json``. If a previous session was
+used, the launcher first asks whether that folder should be reused. Otherwise
+session folders inside the recordings directory are listed in order of most
+recent activity and the user is asked to choose one. Pressing :kbd:`Enter`
+without a choice selects the most recent session. Afterward the user selects
+or creates a game profile and the transcript is written to
+``<session>/transcript/<CampaignName>Transcript``.
+
+When explicit command-line arguments are supplied, the script behaves like a
+thin CLI launcher and forwards directly to :mod:`cli.app` without running the
+interactive session/profile selection flow.
 """
 
 from __future__ import annotations
 
-from pathlib import Path
 from datetime import datetime
-import json
+from pathlib import Path
 import sys
 
-# Ensure application modules can be imported without installing the package
+# Ensure application modules can be imported without installing the package.
 root = Path(__file__).resolve().parent
 sys.path.insert(0, str(root / "src"))
 
-from typing import Any
 from rich.console import Console
 
-from domain.config import GameSettings, GameProfile, LastSession
+from cli.app import main as cli_main
+from domain.config import AppSettings, GameProfile, GameSettings, LastSession
 
 CONFIG_FILE = "appsettings.json"
 GAME_FILE = "gamesettings.json"
 LAST_SESSION_FILE = "lastsession.json"
 
 
-def load_settings(config_path: Path) -> dict[str, Any]:
-    if config_path.exists():
-        try:
-            with config_path.open() as fh:
-                return json.load(fh)
-        except Exception:
-            return {}
-    return {}
+def should_launch_cli_directly(argv: list[str]) -> bool:
+    """Return ``True`` when ``run.py`` should act as a CLI pass-through."""
 
-
-def save_settings(config_path: Path, settings: dict[str, Any]) -> None:
-    config_path.write_text(json.dumps(settings, indent=2))
+    return len(argv) > 1
 
 
 def ensure_recording_dir(config_path: Path, console: Console) -> Path:
-    settings = load_settings(config_path)
-    rec_dir = settings.get("RecordingDirectory", "")
-    while not rec_dir or not Path(rec_dir).is_dir():
-        rec_dir = console.input("Enter full path to recordings directory: ").strip()
-        if not rec_dir:
+    """Load the saved recordings directory or prompt until a valid one exists."""
+
+    settings = AppSettings.load(config_path)
+    recording_dir = settings.recording_directory
+
+    while not recording_dir.is_dir():
+        reply = console.input("Enter full path to recordings directory: ").strip()
+        if not reply:
             continue
-        if Path(rec_dir).is_dir():
-            settings["RecordingDirectory"] = rec_dir
-            save_settings(config_path, settings)
+
+        candidate = Path(reply)
+        if candidate.is_dir():
+            settings.recording_directory = candidate
+            settings.save(config_path)
             break
+
         console.print("Directory not found. Please try again.")
-        rec_dir = ""
-    return Path(rec_dir)
+        recording_dir = Path()
+
+    return settings.recording_directory
 
 
-def choose_session(recordings_dir: Path, console: Console) -> Path:
+def choose_session(
+    recordings_dir: Path,
+    console: Console,
+    last_session_name: str | None = None,
+) -> Path:
     """Prompt the user to choose a recording session.
 
-    Sessions are ordered by modification time with the most recent first. If
-    the user presses :kbd:`Enter` without typing a number the newest session
-    is selected automatically.
+    Sessions are ordered by modification time with the most recent first. When
+    a previously used session still exists, the user is first asked whether it
+    should be reused. If that session is declined, pressing :kbd:`Enter`
+    without typing a number selects the newest session automatically.
     """
 
     sessions = [p for p in recordings_dir.iterdir() if p.is_dir()]
@@ -79,6 +88,24 @@ def choose_session(recordings_dir: Path, console: Console) -> Path:
         raise SystemExit(1)
 
     sessions.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+
+    # Reuse the last successful session only when the user explicitly confirms
+    # it, which avoids silently pointing a new transcript at the wrong folder.
+    last_session = next(
+        (session for session in sessions if session.name == last_session_name),
+        None,
+    )
+    if last_session is not None:
+        while True:
+            reply = console.input(
+                f'Use last recording session "{last_session.name}"? [Y/n]: '
+            ).strip().lower()
+            if reply in {"", "y", "yes"}:
+                return last_session
+            if reply in {"n", "no"}:
+                break
+            console.print("Please answer Y or N.")
+
     console.print("\nSessions:")
     for idx, sess in enumerate(sessions, 1):
         stamp = datetime.fromtimestamp(sess.stat().st_mtime).strftime("%Y-%m-%d %H:%M")
@@ -96,18 +123,7 @@ def choose_session(recordings_dir: Path, console: Console) -> Path:
 
 
 def choose_game_profile(settings_path: Path, console: Console) -> tuple[str, GameProfile]:
-    """Select an existing game profile or create a new one.
-
-    Parameters
-    ----------
-    settings_path:
-        Location of the ``gamesettings.json`` file.
-
-    Returns
-    -------
-    tuple[str, GameProfile]
-        The name of the selected profile and the profile instance.
-    """
+    """Select an existing game profile or create a new one."""
 
     settings = GameSettings.load(settings_path)
     if settings.profiles:
@@ -129,6 +145,7 @@ def choose_game_profile(settings_path: Path, console: Console) -> tuple[str, Gam
         profile_name = console.input("Enter profile name: ").strip()
         if profile_name:
             break
+
     campaign = console.input("Enter name of the campaign: ").strip() or profile_name
     profile = GameProfile(campaign=campaign)
     settings.profiles[profile_name] = profile
@@ -137,15 +154,23 @@ def choose_game_profile(settings_path: Path, console: Console) -> tuple[str, Gam
 
 
 def main() -> None:
-    # ``root`` already points to repository root via module-level setup.
+    """Launch the interactive helper or forward directly to the CLI."""
+
     console = Console()
+
+    if should_launch_cli_directly(sys.argv):
+        _ = cli_main()
+        return
+
     config_path = root / CONFIG_FILE
     recordings_dir = ensure_recording_dir(config_path, console)
-    session_dir = choose_session(recordings_dir, console)
+    last_path = root / LAST_SESSION_FILE
+    last = LastSession.load(last_path)
+    session_dir = choose_session(recordings_dir, console, last.recording_session)
 
     profile_name, profile = choose_game_profile(root / GAME_FILE, console)
 
-    # Prepare output directory ``<session>/transcript``
+    # Prepare the default output location for the selected session/profile.
     transcript_dir = session_dir / "transcript"
     transcript_dir.mkdir(exist_ok=True)
     out_base = transcript_dir / f"{profile.campaign}Transcript"
@@ -155,14 +180,10 @@ def main() -> None:
     if "--out" not in sys.argv:
         sys.argv.extend(["--out", str(out_base)])
 
-    # Remember last used session and profile
-    last_path = root / LAST_SESSION_FILE
-    last = LastSession.load(last_path)
+    # Persist the most recent interactive selection for the next launch.
     last.recording_session = session_dir.name
     last.game_profile = profile_name
     last.save(last_path)
-
-    from cli.app import main as cli_main
 
     _ = cli_main(profile)
 
