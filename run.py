@@ -33,11 +33,22 @@ sys.path.insert(0, str(root / "src"))
 from rich.console import Console
 
 from cli.app import main as cli_main
-from domain.config import AppSettings, GameProfile, GameSettings, LastSession
+from domain.config import AppSettings, GameProfile, GameSettings, JsonConfigStore, LastSession
 
 CONFIG_FILE = "appsettings.json"
 GAME_FILE = "gamesettings.json"
 LAST_SESSION_FILE = "lastsession.json"
+AUDIO_EXTENSIONS = {
+    ".aac",
+    ".flac",
+    ".m4a",
+    ".mp3",
+    ".ogg",
+    ".opus",
+    ".wav",
+    ".webm",
+    ".wma",
+}
 
 
 def should_launch_cli_directly(argv: list[str]) -> bool:
@@ -46,14 +57,63 @@ def should_launch_cli_directly(argv: list[str]) -> bool:
     return len(argv) > 1
 
 
+def has_saved_recording_directory(config_path: Path) -> bool:
+    """Return ``True`` when ``appsettings.json`` contains a stored path."""
+
+    data = JsonConfigStore.load_dict(config_path)
+    return bool(data.get("recording_directory") or data.get("RecordingDirectory"))
+
+
+def is_recording_session_dir(path: Path) -> bool:
+    """Return ``True`` when ``path`` already looks like a single session folder.
+
+    A session folder typically contains one or more audio recordings directly
+    inside the directory. Detecting that shape lets the launcher use the
+    folder as-is instead of incorrectly listing helper subdirectories such as
+    ``transcript`` or ``.qodo`` as if they were separate sessions.
+    """
+
+    if not path.is_dir():
+        return False
+
+    try:
+        return any(
+            child.is_file() and child.suffix.lower() in AUDIO_EXTENSIONS
+            for child in path.iterdir()
+        )
+    except OSError:
+        return False
+
+
+def confirm_saved_recording_directory(recording_dir: Path, console: Console) -> bool:
+    """Ask whether the previously saved folder should be reused."""
+
+    folder_kind = "session folder" if is_recording_session_dir(recording_dir) else "recordings directory"
+    while True:
+        reply = console.input(
+            f'Use saved {folder_kind} "{recording_dir}"? [Y/n]: '
+        ).strip().lower()
+        if reply in {"", "y", "yes"}:
+            return True
+        if reply in {"n", "no"}:
+            return False
+        console.print("Please answer Y or N.")
+
+
 def ensure_recording_dir(config_path: Path, console: Console) -> Path:
-    """Load the saved recordings directory or prompt until a valid one exists."""
+    """Load or prompt for the recordings directory or a direct session folder."""
 
     settings = AppSettings.load(config_path)
     recording_dir = settings.recording_directory
 
-    while not recording_dir.is_dir():
-        reply = console.input("Enter full path to recordings directory: ").strip()
+    if has_saved_recording_directory(config_path) and recording_dir.is_dir():
+        if confirm_saved_recording_directory(recording_dir, console):
+            return recording_dir
+
+    while True:
+        reply = console.input(
+            "Enter full path to recordings directory or session folder: "
+        ).strip()
         if not reply:
             continue
 
@@ -61,12 +121,9 @@ def ensure_recording_dir(config_path: Path, console: Console) -> Path:
         if candidate.is_dir():
             settings.recording_directory = candidate
             settings.save(config_path)
-            break
+            return candidate
 
         console.print("Directory not found. Please try again.")
-        recording_dir = Path()
-
-    return settings.recording_directory
 
 
 def choose_session(
@@ -166,7 +223,10 @@ def main() -> None:
     recordings_dir = ensure_recording_dir(config_path, console)
     last_path = root / LAST_SESSION_FILE
     last = LastSession.load(last_path)
-    session_dir = choose_session(recordings_dir, console, last.recording_session)
+    if is_recording_session_dir(recordings_dir):
+        session_dir = recordings_dir
+    else:
+        session_dir = choose_session(recordings_dir, console, last.recording_session)
 
     profile_name, profile = choose_game_profile(root / GAME_FILE, console)
 
