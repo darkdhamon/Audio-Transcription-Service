@@ -61,6 +61,13 @@ Or on Windows:
 ./start-gui.ps1
 ```
 
+If `.ps1` files open in an editor on your machine, you can double-click the
+Windows launcher instead:
+
+```text
+start-gui.cmd
+```
+
 The current GUI preview supports:
 
 - Choosing a recordings directory or a direct session folder
