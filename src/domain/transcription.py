@@ -63,6 +63,7 @@ class TranscriptionOptions:
     # These fields are filled in once runtime detection selects the most
     # compatible execution path for the current machine.
     resolved_model: Optional[str] = None
+    resolved_model_load_target: Optional[str] = None
     resolved_device: Optional[Literal["cpu", "cuda"]] = None
     resolved_compute_type: Optional[str] = None
     runtime_notes: List[str] = field(default_factory=list)
@@ -461,6 +462,7 @@ class TranscriptionService:
         if self._runtime is None:
             runtime = resolve_runtime_selection(self.options)
             self.options.resolved_model = runtime.model
+            self.options.resolved_model_load_target = runtime.model_load_target
             self.options.resolved_device = runtime.device
             self.options.resolved_compute_type = runtime.compute_type
             self.options.runtime_notes = list(runtime.notes)

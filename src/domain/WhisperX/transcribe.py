@@ -58,7 +58,7 @@ def transcribe(
             "The 'whisperx' package is required. Install it with 'pip install whisperx'."
         ) from exc
 
-    resolved_model = options.resolved_model or options.model
+    resolved_model = options.resolved_model_load_target or options.resolved_model or options.model
     resolved_device = options.resolved_device or "cpu"
     resolved_compute_type = options.resolved_compute_type or "int8"
 

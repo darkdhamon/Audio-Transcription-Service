@@ -15,6 +15,7 @@ runtime in a consistent way.
 """
 
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import List, Literal, Optional, TYPE_CHECKING
 import importlib.util
 import json
@@ -26,6 +27,10 @@ if TYPE_CHECKING:  # pragma: no cover - imported only for type checking
 
 
 ResolvedDevice = Literal["cpu", "cuda"]
+LOCAL_MODEL_ROOT = Path.home() / ".cache" / "huggingface" / "local-models"
+LOCAL_MODEL_DIRS = {
+    "distil-large-v3": "Systran--faster-distil-whisper-large-v3",
+}
 
 
 @dataclass
@@ -59,6 +64,7 @@ class RuntimeSelection:
 
     engine: Literal["faster-whisper", "whisperx"]
     model: str
+    model_load_target: str
     device: ResolvedDevice
     compute_type: str
     notes: List[str] = field(default_factory=list)
@@ -182,7 +188,36 @@ def _resolve_model_name(options: "TranscriptionOptions", device: ResolvedDevice)
         # transcription. CPU fallback remains on ``small`` for broad compatibility.
         return "turbo"
 
+    if options.engine == "faster-whisper" and device == "cpu" and options.lang.lower() == "en":
+        # ``distil-large-v3`` is a strong long-form English ASR default when
+        # GPU acceleration is unavailable. It preserves the original Whisper
+        # 30-second context window while improving speed and quality relative
+        # to the older small CPU default for this project.
+        return "distil-large-v3"
+
     return "small"
+
+
+def _find_local_model_directory(model_name: str) -> Optional[Path]:
+    """Return the local model directory for ``model_name`` when it exists."""
+
+    explicit_path = Path(model_name)
+    if explicit_path.is_dir():
+        return explicit_path
+
+    directory_name = LOCAL_MODEL_DIRS.get(model_name)
+    if not directory_name:
+        return None
+
+    candidate = LOCAL_MODEL_ROOT / directory_name
+    if not candidate.is_dir():
+        return None
+
+    # Faster-Whisper local models need these metadata and weight files.
+    required_files = ("config.json", "tokenizer.json", "model.bin")
+    if all((candidate / file_name).exists() for file_name in required_files):
+        return candidate
+    return None
 
 
 def _resolve_compute_type(options: "TranscriptionOptions", device: ResolvedDevice) -> str:
@@ -235,9 +270,15 @@ def resolve_runtime_selection(options: "TranscriptionOptions") -> RuntimeSelecti
     else:
         notes.append("NVIDIA CUDA detected. Using GPU acceleration.")
 
+    model = _resolve_model_name(options, device)
+    local_model_dir = _find_local_model_directory(model)
+    if local_model_dir is not None:
+        notes.append(f"Using local model cache at {local_model_dir}.")
+
     return RuntimeSelection(
         engine=options.engine,
-        model=_resolve_model_name(options, device),
+        model=model,
+        model_load_target=str(local_model_dir) if local_model_dir is not None else model,
         device=device,
         compute_type=_resolve_compute_type(options, device),
         notes=notes,
