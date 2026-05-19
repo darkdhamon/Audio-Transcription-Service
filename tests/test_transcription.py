@@ -1,11 +1,10 @@
 """Test suite for core transcription utilities and services.
 
 This module exercises helper functions and service methods used during
-transcription.  The tests validate timestamp parsing, offset detection,
-segment de-duplication, repeat collapsing, and merging output parts.
+transcription.  The tests validate segment de-duplication, repeat
+collapsing, VAD setup, and merging output parts.
 """
 
-from datetime import datetime, timezone
 from pathlib import Path
 import json
 import queue
@@ -25,8 +24,6 @@ from domain.transcription import (
     build_vad_parameters,
     collapse_nearby_repeats,
     dedupe_consecutive,
-    filename_offsets,
-    parse_ts_from_name,
     worker_transcribe,
 )
 
@@ -35,7 +32,6 @@ def dummy_worker(
     file_path: str,
     options: TranscriptionOptions,
     vad_params: Dict,
-    offset: float,
     cpu_threads: int,
     prog_q,
     speaker_label: str,
@@ -58,49 +54,6 @@ def dummy_worker(
             "backend": getattr(transcribe_fn, "__module__", ""),
         }
     )
-
-
-class TestParseTimestamp:
-    """Tests for parsing timestamps embedded in filenames."""
-
-    def test_parse_ts_from_name_valid(self) -> None:
-        """A well-formed filename should yield the correct UTC timestamp."""
-
-        name = "2023-10-31_15-45-00.123.wav"
-        expected = datetime(2023, 10, 31, 15, 45, 0, 123000, tzinfo=timezone.utc).timestamp()
-        result = parse_ts_from_name(name)
-        assert result == pytest.approx(expected)
-
-    def test_parse_ts_from_name_invalid(self) -> None:
-        """Filenames without a timestamp pattern should return ``None``."""
-
-        assert parse_ts_from_name("no_timestamp.wav") is None
-
-
-class TestFilenameOffsets:
-    """Tests for computing filename based time offsets."""
-
-    def test_filename_offsets_capture_baseline(self, tmp_path: Path) -> None:
-        """Offsets are computed relative to the capture file when present."""
-
-        capture = tmp_path / "capture_2024-01-01_10-00-00.wav"
-        other = tmp_path / "playback_user_2024-01-01_10-00-05.wav"
-        capture.write_text("dummy")
-        other.write_text("dummy")
-        files = [str(other)]
-
-        offsets = filename_offsets(files, str(tmp_path), baseline="capture")
-        assert offsets == {other.name.lower(): 5.0}
-
-    def test_filename_offsets_no_candidates(self, tmp_path: Path) -> None:
-        """If no files contain timestamps, an empty dictionary is returned."""
-
-        sample = tmp_path / "audio.wav"
-        sample.write_text("dummy")
-        offsets = filename_offsets([str(sample)], str(tmp_path), baseline="capture")
-        assert offsets == {}
-
-
 class TestSegmentUtilities:
     """Tests for segment de-duplication and collapsing logic."""
 
@@ -201,7 +154,6 @@ class TestRunParallelCaching:
             files,
             workers=2,
             speakers={},
-            offsets={},
             options=options,
             progress_callback=progress,
         )
@@ -250,7 +202,6 @@ class TestVadConfiguration:
             "audio.wav",
             TranscriptionOptions(vad=True),
             {},
-            0.0,
             "Speaker",
         )
 
@@ -292,7 +243,6 @@ class TestVadConfiguration:
             "audio.wav",
             TranscriptionOptions(vad=True),
             {},
-            0.0,
             "Speaker",
             progress_callback=progress_positions.append,
         )
@@ -323,15 +273,14 @@ class TestWorkerProgress:
             audio_path: str,
             options: TranscriptionOptions,
             vad_params: Dict,
-            offset: float,
             speaker_label: str,
             progress_callback,
         ) -> List[Dict]:
             progress_callback(2.5)
             progress_callback(6.0)
             return [
-                {"start": offset + 0.0, "end": offset + 2.5, "text": "hello", "speaker": speaker_label},
-                {"start": offset + 2.5, "end": offset + 6.0, "text": "there", "speaker": speaker_label},
+                {"start": 0.0, "end": 2.5, "text": "hello", "speaker": speaker_label},
+                {"start": 2.5, "end": 6.0, "text": "there", "speaker": speaker_label},
             ]
 
         progress_queue: "queue.Queue[Dict]" = queue.Queue()
@@ -339,7 +288,6 @@ class TestWorkerProgress:
             str(audio_file),
             TranscriptionOptions(),
             {},
-            0.0,
             0,
             progress_queue,
             "Speaker",
@@ -385,7 +333,6 @@ class TestEngineSelection:
             files,
             workers=1,
             speakers={},
-            offsets={},
             options=opts,
             progress_callback=progress,
         )
@@ -397,7 +344,6 @@ class TestEngineSelection:
             files,
             workers=1,
             speakers={},
-            offsets={},
             options=opts,
             progress_callback=progress,
         )
@@ -426,7 +372,6 @@ class TestSkipExisting:
             [str(audio_one), str(audio_two)],
             workers=2,
             speakers={},
-            offsets={},
             options=transcription.TranscriptionOptions(skip_existing=True),
         )
 

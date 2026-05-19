@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 from queue import Empty, Queue
+import json
 import threading
 import traceback
 import tkinter as tk
@@ -18,7 +19,16 @@ from domain.launcher import (
     build_speaker_assignments,
     list_session_audio_files,
 )
+from domain.session_media import (
+    CombinedSessionAudioBuilder,
+    SessionMediaCatalog,
+    TranscriptBundle,
+    TranscriptSegment,
+    choose_preferred_transcript_bundle,
+    transcript_output_base_name,
+)
 from domain.transcription import TranscriptionOptions, TranscriptionService
+from gui.audio import create_audio_player
 
 CONFIG_FILE = "appsettings.json"
 GAME_FILE = "gamesettings.json"
@@ -26,6 +36,7 @@ LAST_SESSION_FILE = "lastsession.json"
 ENGINE_CHOICES = ("faster-whisper", "whisperx")
 MODEL_CHOICES = ("auto", "distil-large-v3", "small", "turbo", "large-v3")
 LANGUAGE_DEFAULT = "en"
+UI_POLL_INTERVAL_MS = 150
 
 
 @dataclass
@@ -53,6 +64,15 @@ class TranscriptionGuiApp:
         self.current_assignments: List[SpeakerAssignment] = []
         self.current_profiles: Dict[str, GameProfile] = {}
         self.progress_rows: Dict[str, ProgressRow] = {}
+        self.media_catalog = SessionMediaCatalog()
+        self.audio_builder = CombinedSessionAudioBuilder(self.media_catalog)
+        self.audio_player = create_audio_player()
+        self.current_transcript_bundles: List[TranscriptBundle] = []
+        self.current_transcript_bundle: Optional[TranscriptBundle] = None
+        self.current_transcript_segments: List[TranscriptSegment] = []
+        self.transcript_item_ids: List[str] = []
+        self.active_segment_index = -1
+        self.is_busy = False
 
         self.recordings_path_var = tk.StringVar()
         self.session_name_var = tk.StringVar()
@@ -66,14 +86,20 @@ class TranscriptionGuiApp:
         self.runtime_notes_var = tk.StringVar(value="")
         self.status_var = tk.StringVar(value="Choose a recordings path or session folder to begin.")
         self.session_hint_var = tk.StringVar(value="")
+        self.transcript_name_var = tk.StringVar()
+        self.transcript_status_var = tk.StringVar(value="No transcript loaded.")
+        self.audio_status_var = tk.StringVar(value=self.audio_player.availability_message)
+        self.audio_position_var = tk.StringVar(value="00:00:00 / 00:00:00")
+        self.pause_button_text_var = tk.StringVar(value="Pause")
         self.speaker_vars: Dict[str, tk.StringVar] = {}
 
         self.root.title("Audio Transcription Service")
-        self.root.minsize(1100, 760)
+        self.root.minsize(1180, 820)
+        self.root.protocol("WM_DELETE_WINDOW", self._on_window_close)
         self._build_layout()
         self._bind_variable_updates()
         self._load_initial_state()
-        self.root.after(150, self._pump_events)
+        self.root.after(UI_POLL_INTERVAL_MS, self._pump_events)
 
     def _build_layout(self) -> None:
         """Create and arrange the main GUI widgets."""
@@ -163,27 +189,26 @@ class TranscriptionGuiApp:
         ttk.Spinbox(options_frame, from_=0, to=32, textvariable=self.workers_var, width=6).grid(
             row=0, column=7, padx=(0, 8), pady=8, sticky="w"
         )
-
         runtime_frame = ttk.LabelFrame(main, text="Runtime Preview")
         runtime_frame.grid(row=3, column=0, sticky="ew", pady=(0, 8))
         runtime_frame.columnconfigure(0, weight=1)
         ttk.Label(
             runtime_frame,
             textvariable=self.runtime_summary_var,
-            wraplength=1040,
+            wraplength=1120,
             justify="left",
         ).grid(row=0, column=0, sticky="w", padx=8, pady=(8, 4))
         ttk.Label(
             runtime_frame,
             textvariable=self.runtime_notes_var,
-            wraplength=1040,
+            wraplength=1120,
             justify="left",
         ).grid(row=1, column=0, sticky="w", padx=8, pady=(0, 8))
 
         content_frame = ttk.Frame(main)
         content_frame.grid(row=4, column=0, sticky="nsew")
         content_frame.columnconfigure(0, weight=1)
-        content_frame.columnconfigure(1, weight=1)
+        content_frame.columnconfigure(1, weight=2)
         content_frame.rowconfigure(0, weight=1)
 
         speakers_frame = ttk.LabelFrame(content_frame, text="Speaker Names")
@@ -206,8 +231,10 @@ class TranscriptionGuiApp:
             lambda _event: self.speakers_canvas.configure(scrollregion=self.speakers_canvas.bbox("all")),
         )
 
-        progress_frame = ttk.LabelFrame(content_frame, text="Progress")
-        progress_frame.grid(row=0, column=1, sticky="nsew", padx=(6, 0))
+        details_notebook = ttk.Notebook(content_frame)
+        details_notebook.grid(row=0, column=1, sticky="nsew", padx=(6, 0))
+
+        progress_frame = ttk.Frame(details_notebook, padding=6)
         progress_frame.columnconfigure(0, weight=1)
         progress_frame.rowconfigure(0, weight=1)
         self.progress_tree = ttk.Treeview(
@@ -219,29 +246,133 @@ class TranscriptionGuiApp:
         self.progress_tree.heading("file", text="File")
         self.progress_tree.heading("status", text="Status")
         self.progress_tree.heading("progress", text="Progress")
-        self.progress_tree.column("file", width=320, anchor="w")
+        self.progress_tree.column("file", width=360, anchor="w")
         self.progress_tree.column("status", width=140, anchor="w")
-        self.progress_tree.column("progress", width=160, anchor="w")
+        self.progress_tree.column("progress", width=180, anchor="w")
         self.progress_tree.grid(row=0, column=0, sticky="nsew")
         progress_scrollbar = ttk.Scrollbar(
             progress_frame, orient="vertical", command=self.progress_tree.yview
         )
         progress_scrollbar.grid(row=0, column=1, sticky="ns")
         self.progress_tree.configure(yscrollcommand=progress_scrollbar.set)
+        details_notebook.add(progress_frame, text="Progress")
+
+        transcript_frame = ttk.Frame(details_notebook, padding=6)
+        transcript_frame.columnconfigure(1, weight=1)
+        transcript_frame.rowconfigure(3, weight=1)
+
+        ttk.Label(transcript_frame, text="Transcript").grid(row=0, column=0, sticky="w")
+        self.transcript_combo = ttk.Combobox(
+            transcript_frame,
+            textvariable=self.transcript_name_var,
+            state="readonly",
+        )
+        self.transcript_combo.grid(row=0, column=1, sticky="ew", padx=(6, 8))
+        self.transcript_combo.bind(
+            "<<ComboboxSelected>>",
+            lambda _event: self._on_transcript_selection_changed(),
+        )
+        self.refresh_transcript_button = ttk.Button(
+            transcript_frame,
+            text="Refresh Transcript",
+            command=self._refresh_transcript_view,
+        )
+        self.refresh_transcript_button.grid(row=0, column=2, padx=(0, 8))
+        self.build_audio_button = ttk.Button(
+            transcript_frame,
+            text="Build Synced Audio",
+            command=self._start_session_audio_build,
+        )
+        self.build_audio_button.grid(row=0, column=3)
+
+        status_frame = ttk.Frame(transcript_frame)
+        status_frame.grid(row=1, column=0, columnspan=4, sticky="ew", pady=(8, 6))
+        status_frame.columnconfigure(0, weight=1)
+        ttk.Label(
+            status_frame,
+            textvariable=self.transcript_status_var,
+            wraplength=760,
+            justify="left",
+        ).grid(row=0, column=0, sticky="w")
+        ttk.Label(
+            status_frame,
+            textvariable=self.audio_status_var,
+            wraplength=760,
+            justify="left",
+        ).grid(row=1, column=0, sticky="w", pady=(4, 0))
+
+        playback_frame = ttk.Frame(transcript_frame)
+        playback_frame.grid(row=2, column=0, columnspan=4, sticky="ew", pady=(0, 6))
+        self.play_audio_button = ttk.Button(
+            playback_frame,
+            text="Play",
+            command=self._play_session_audio,
+        )
+        self.play_audio_button.grid(row=0, column=0, padx=(0, 8))
+        self.pause_audio_button = ttk.Button(
+            playback_frame,
+            textvariable=self.pause_button_text_var,
+            command=self._toggle_audio_pause,
+        )
+        self.pause_audio_button.grid(row=0, column=1, padx=(0, 8))
+        self.stop_audio_button = ttk.Button(
+            playback_frame,
+            text="Stop",
+            command=self._stop_audio,
+        )
+        self.stop_audio_button.grid(row=0, column=2, padx=(0, 16))
+        ttk.Label(playback_frame, textvariable=self.audio_position_var).grid(row=0, column=3, sticky="w")
+
+        transcript_tree_frame = ttk.Frame(transcript_frame)
+        transcript_tree_frame.grid(row=3, column=0, columnspan=4, sticky="nsew")
+        transcript_tree_frame.columnconfigure(0, weight=1)
+        transcript_tree_frame.rowconfigure(0, weight=1)
+        self.transcript_tree = ttk.Treeview(
+            transcript_tree_frame,
+            columns=("time", "speaker", "text"),
+            show="headings",
+            height=14,
+        )
+        self.transcript_tree.heading("time", text="Time")
+        self.transcript_tree.heading("speaker", text="Speaker")
+        self.transcript_tree.heading("text", text="Transcript")
+        self.transcript_tree.column("time", width=110, anchor="w", stretch=False)
+        self.transcript_tree.column("speaker", width=140, anchor="w", stretch=False)
+        self.transcript_tree.column("text", width=540, anchor="w")
+        self.transcript_tree.grid(row=0, column=0, sticky="nsew")
+        self.transcript_tree.tag_configure("active", background="#d8f0d0")
+        self.transcript_tree.bind("<Double-1>", lambda _event: self._play_selected_segment())
+        transcript_v_scroll = ttk.Scrollbar(
+            transcript_tree_frame, orient="vertical", command=self.transcript_tree.yview
+        )
+        transcript_v_scroll.grid(row=0, column=1, sticky="ns")
+        transcript_h_scroll = ttk.Scrollbar(
+            transcript_tree_frame, orient="horizontal", command=self.transcript_tree.xview
+        )
+        transcript_h_scroll.grid(row=1, column=0, sticky="ew")
+        self.transcript_tree.configure(
+            yscrollcommand=transcript_v_scroll.set,
+            xscrollcommand=transcript_h_scroll.set,
+        )
+        details_notebook.add(transcript_frame, text="Transcript Viewer")
 
         log_frame = ttk.LabelFrame(main, text="Status")
         log_frame.grid(row=5, column=0, sticky="ew", pady=(8, 0))
         log_frame.columnconfigure(0, weight=1)
-        ttk.Label(log_frame, textvariable=self.session_hint_var, wraplength=1040).grid(
+        ttk.Label(log_frame, textvariable=self.session_hint_var, wraplength=1120).grid(
             row=0, column=0, sticky="w", padx=8, pady=(8, 4)
         )
-        ttk.Label(log_frame, textvariable=self.status_var, wraplength=1040).grid(
+        ttk.Label(log_frame, textvariable=self.status_var, wraplength=1120).grid(
             row=1, column=0, sticky="w", padx=8, pady=(0, 8)
         )
 
         button_frame = ttk.Frame(main)
         button_frame.grid(row=6, column=0, sticky="e", pady=(8, 0))
-        self.start_button = ttk.Button(button_frame, text="Start Transcription", command=self._start_transcription)
+        self.start_button = ttk.Button(
+            button_frame,
+            text="Start Transcription",
+            command=self._start_transcription,
+        )
         self.start_button.grid(row=0, column=0, padx=(0, 8))
         ttk.Button(button_frame, text="Refresh Runtime", command=self._refresh_runtime_preview).grid(
             row=0, column=1
@@ -268,6 +399,7 @@ class TranscriptionGuiApp:
         if self.recordings_path_var.get():
             self._refresh_catalog(select_last_session=True)
         self._refresh_runtime_preview()
+        self._update_action_states()
 
     def _load_profiles(self) -> None:
         """Load saved game profiles into the editable combobox."""
@@ -298,6 +430,11 @@ class TranscriptionGuiApp:
             self.session_hint_var.set("")
             self.status_var.set("Choose a valid recordings directory or session folder.")
             self._rebuild_speaker_editor([])
+            self._reset_transcript_view(
+                "Choose a valid session before loading transcript outputs.",
+                session_path=None,
+            )
+            self._update_action_states()
             return
 
         AppSettings(recording_directory=source_path).save(self.config_path)
@@ -318,10 +455,14 @@ class TranscriptionGuiApp:
             self.session_combo.configure(state="readonly")
             if not session_names:
                 self.session_name_var.set("")
-                self.session_combo.configure(state="readonly")
                 self.session_hint_var.set("No session folders were found in the selected directory.")
                 self._rebuild_speaker_editor([])
+                self._reset_transcript_view(
+                    "No transcript outputs are available because no session is selected.",
+                    session_path=None,
+                )
                 self.status_var.set("Select a different folder or add session directories.")
+                self._update_action_states()
                 return
 
             preferred_session = None
@@ -373,6 +514,11 @@ class TranscriptionGuiApp:
         session_path = self._get_selected_session_path()
         if session_path is None or not session_path.is_dir():
             self._rebuild_speaker_editor([])
+            self._reset_transcript_view(
+                "Choose a valid session before loading transcript outputs.",
+                session_path=None,
+            )
+            self._update_action_states()
             return
 
         files = list_session_audio_files(session_path)
@@ -385,6 +531,9 @@ class TranscriptionGuiApp:
             self.status_var.set(f"Loaded {len(assignments)} audio file(s) from {session_path.name}.")
         else:
             self.status_var.set("No audio files were found in the selected session.")
+
+        self._refresh_transcript_view()
+        self._update_action_states()
 
     def _rebuild_speaker_editor(self, assignments: List[SpeakerAssignment]) -> None:
         """Render editable speaker-name rows for each audio file."""
@@ -446,8 +595,8 @@ class TranscriptionGuiApp:
     def _start_transcription(self) -> None:
         """Validate inputs, persist selections, and launch a background run."""
 
-        if self.worker_thread is not None and self.worker_thread.is_alive():
-            messagebox.showinfo("Transcription Running", "A transcription job is already running.")
+        if self.is_busy:
+            messagebox.showinfo("Background Job Running", "Wait for the current background job to finish first.")
             return
 
         session_path = self._get_selected_session_path()
@@ -492,14 +641,57 @@ class TranscriptionGuiApp:
 
         self.progress_tree.delete(*self.progress_tree.get_children())
         self.progress_rows.clear()
+        self._stop_audio()
         self.status_var.set(f"Starting transcription for {session_path.name}...")
-        self.start_button.configure(state="disabled")
+        self.is_busy = True
+        self._update_action_states()
 
         options = self._build_transcription_options()
         workers = max(0, int(self.workers_var.get()))
         self.worker_thread = threading.Thread(
             target=self._run_transcription,
-            args=(session_path, out_base, profile_name, profile, speakers, options, workers),
+            args=(
+                session_path,
+                out_base,
+                profile_name,
+                profile,
+                speakers,
+                options,
+                workers,
+            ),
+            daemon=True,
+        )
+        self.worker_thread.start()
+
+    def _start_session_audio_build(self) -> None:
+        """Build transcript-synced session audio in the background."""
+
+        if self.is_busy:
+            messagebox.showinfo("Background Job Running", "Wait for the current background job to finish first.")
+            return
+
+        session_path = self._get_selected_session_path()
+        if session_path is None or not session_path.is_dir():
+            messagebox.showerror("Missing Session", "Choose a valid session before building session audio.")
+            return
+
+        if not list_session_audio_files(session_path):
+            messagebox.showerror("No Audio Files", "The selected session does not contain transcribable audio files.")
+            return
+        if self.current_transcript_bundle is None:
+            messagebox.showerror(
+                "Missing Transcript",
+                "Load a generated transcript first so synced audio can follow the transcript timing.",
+            )
+            return
+
+        self._stop_audio()
+        self.status_var.set(f"Building synced session audio for {session_path.name}...")
+        self.is_busy = True
+        self._update_action_states()
+        self.worker_thread = threading.Thread(
+            target=self._run_session_audio_build,
+            args=(session_path, self.current_transcript_bundle),
             daemon=True,
         )
         self.worker_thread.start()
@@ -541,12 +733,43 @@ class TranscriptionGuiApp:
             settings = GameSettings.load(self.game_settings_path)
             settings.profiles[profile_name] = profile
             settings.save(self.game_settings_path)
+            self.media_catalog.write_bundle_metadata(
+                session_path=session_path,
+                transcript_json_path=out_base.with_suffix(".json"),
+                speakers=speakers,
+            )
 
             self.event_queue.put(
                 {
                     "type": "completed",
                     "message": f"Transcription completed: {out_base}.txt",
                     "output_dir": str(transcript_dir_from_out_base(out_base)),
+                    "preferred_transcript": out_base.name,
+                }
+            )
+        except Exception as exc:  # pragma: no cover - exercised through the GUI manually
+            self.event_queue.put(
+                {
+                    "type": "error",
+                    "message": str(exc),
+                    "traceback": traceback.format_exc(),
+                }
+            )
+
+    def _run_session_audio_build(
+        self,
+        session_path: Path,
+        bundle: TranscriptBundle,
+    ) -> None:
+        """Create transcript-synced session audio on a worker thread."""
+
+        try:
+            output_path = self.audio_builder.build_for_session(session_path, bundle=bundle)
+            self.event_queue.put(
+                {
+                    "type": "audio_built",
+                    "message": f"Synced session audio created: {output_path.name}",
+                    "audio_path": str(output_path),
                 }
             )
         except Exception as exc:  # pragma: no cover - exercised through the GUI manually
@@ -575,19 +798,30 @@ class TranscriptionGuiApp:
                 self.runtime_notes_var.set(event["notes"])
             elif event_type == "completed":
                 self.status_var.set(event["message"])
-                self.start_button.configure(state="normal")
+                self.is_busy = False
+                self._refresh_transcript_view(preferred_base_name=event.get("preferred_transcript"))
+                self._update_action_states()
                 messagebox.showinfo("Transcription Complete", event["message"])
+            elif event_type == "audio_built":
+                self.status_var.set(event["message"])
+                self.is_busy = False
+                self._refresh_transcript_view()
+                self._update_action_states()
             elif event_type == "error":
-                self.status_var.set(f"Transcription failed: {event['message']}")
-                self.start_button.configure(state="normal")
+                self.status_var.set(f"Background job failed: {event['message']}")
+                self.is_busy = False
+                self._update_action_states()
                 messagebox.showerror(
-                    "Transcription Failed",
+                    "Background Job Failed",
                     f"{event['message']}\n\n{event['traceback']}",
                 )
 
         if self.worker_thread is not None and not self.worker_thread.is_alive():
-            self.start_button.configure(state="normal")
-        self.root.after(150, self._pump_events)
+            self.is_busy = False
+
+        self._sync_transcript_to_audio()
+        self._update_action_states()
+        self.root.after(UI_POLL_INTERVAL_MS, self._pump_events)
 
     def _handle_progress_event(self, message: dict) -> None:
         """Update the progress table from a service progress message."""
@@ -631,6 +865,309 @@ class TranscriptionGuiApp:
             self.progress_tree.set(row.item_id, "status", row.status)
             self.progress_tree.set(row.item_id, "progress", format_progress(row.completed, row.total))
 
+    def _refresh_transcript_view(self, preferred_base_name: Optional[str] = None) -> None:
+        """Load transcript bundles for the selected session and render the preferred one."""
+
+        session_path = self._get_selected_session_path()
+        if session_path is None or not session_path.is_dir():
+            self._reset_transcript_view(
+                "Choose a valid session before loading transcript outputs.",
+                session_path=None,
+            )
+            return
+
+        bundles = self.media_catalog.list_transcript_bundles(session_path)
+        self.current_transcript_bundles = bundles
+        bundle_labels = [bundle.display_name for bundle in bundles]
+        self.transcript_combo["values"] = bundle_labels
+
+        if not bundles:
+            self._reset_transcript_view(
+                "No transcript has been generated for this session yet.",
+                session_path=session_path,
+            )
+            return
+
+        preferred_bundle = choose_preferred_transcript_bundle(
+            bundles,
+            preferred_base_name
+            or transcript_output_base_name(self.campaign_var.get().strip() or self.profile_name_var.get().strip()),
+        )
+        if preferred_bundle is None:
+            self._reset_transcript_view(
+                "No transcript has been generated for this session yet.",
+                session_path=session_path,
+            )
+            return
+
+        self.transcript_name_var.set(preferred_bundle.display_name)
+        self._load_transcript_bundle(preferred_bundle)
+
+    def _reset_transcript_view(self, message: str, session_path: Optional[Path]) -> None:
+        """Clear transcript viewer state and show the provided placeholder message."""
+
+        self.transcript_combo["values"] = []
+        self.transcript_name_var.set("")
+        self.current_transcript_bundles = []
+        self.current_transcript_bundle = None
+        self.current_transcript_segments = []
+        self.transcript_item_ids = []
+        self.transcript_tree.delete(*self.transcript_tree.get_children())
+        self.transcript_status_var.set(message)
+        self.audio_position_var.set("00:00:00 / 00:00:00")
+        self._set_active_transcript_index(-1)
+        self.audio_player.close()
+        self._update_audio_status(session_path=session_path, bundle=None)
+
+    def _on_transcript_selection_changed(self) -> None:
+        """Load the transcript bundle selected in the transcript picker."""
+
+        selected_name = self.transcript_name_var.get().strip()
+        for bundle in self.current_transcript_bundles:
+            if bundle.display_name == selected_name:
+                self._load_transcript_bundle(bundle)
+                return
+
+    def _load_transcript_bundle(self, bundle: TranscriptBundle) -> None:
+        """Load transcript rows from ``bundle`` into the transcript viewer."""
+
+        segments = self.media_catalog.load_segments(bundle)
+        self.current_transcript_bundle = bundle
+        self.current_transcript_segments = segments
+        self.transcript_name_var.set(bundle.display_name)
+        self._populate_transcript_tree(segments)
+
+        transcript_line_label = "line" if len(segments) == 1 else "lines"
+        status_message = f"Loaded {len(segments)} transcript {transcript_line_label} from {bundle.json_path.name}."
+        if self._transcript_uses_legacy_offsets(bundle):
+            status_message += " Re-run this transcript to remove legacy filename timing offsets."
+        self.transcript_status_var.set(status_message)
+        self._set_active_transcript_index(-1)
+        self.audio_position_var.set("00:00:00 / 00:00:00")
+        expected_audio_path = bundle.combined_audio_path.resolve() if bundle.combined_audio_path.exists() else None
+        if self.audio_player.source_path != expected_audio_path:
+            self.audio_player.close()
+        self._update_audio_status(session_path=self._get_selected_session_path(), bundle=bundle)
+
+    def _populate_transcript_tree(self, segments: List[TranscriptSegment]) -> None:
+        """Render transcript rows into the tree view."""
+
+        self.transcript_tree.delete(*self.transcript_tree.get_children())
+        self.transcript_item_ids = []
+
+        for segment in segments:
+            item_id = self.transcript_tree.insert(
+                "",
+                "end",
+                values=(
+                    format_transcript_timestamp(segment.start),
+                    segment.speaker,
+                    segment.text,
+                ),
+            )
+            self.transcript_item_ids.append(item_id)
+
+    def _update_audio_status(
+        self,
+        session_path: Optional[Path],
+        bundle: Optional[TranscriptBundle],
+    ) -> None:
+        """Refresh the audio helper text shown in the transcript viewer."""
+
+        audio_status_lines: List[str] = [self.audio_player.availability_message]
+
+        if session_path is None:
+            self.audio_status_var.set(audio_status_lines[0])
+            return
+
+        if bundle is not None:
+            audio_status_lines.append(f"Transcript JSON: {bundle.json_path.name}")
+            if self._transcript_uses_legacy_offsets(bundle):
+                audio_status_lines.append("Legacy offset transcript detected. Re-run transcription for best sync.")
+            combined_audio_path = bundle.combined_audio_path
+        else:
+            combined_audio_path = self.media_catalog.combined_audio_path_for_session(session_path)
+
+        if combined_audio_path.exists():
+            audio_status_lines.append(f"Synced audio: {combined_audio_path.name}")
+        else:
+            audio_status_lines.append("Build synced audio to match the transcript timing.")
+
+        self.audio_status_var.set("  ".join(audio_status_lines))
+
+    def _update_action_states(self) -> None:
+        """Enable or disable buttons to match the current application state."""
+
+        session_selected = self._get_selected_session_path() is not None
+        transcript_loaded = self.current_transcript_bundle is not None and bool(self.current_transcript_segments)
+        audio_file_ready = (
+            self.current_transcript_bundle is not None
+            and self.current_transcript_bundle.combined_audio_path.exists()
+        )
+        player_loaded = self.audio_player.is_loaded()
+        player_playing = self.audio_player.is_playing()
+        player_paused = self.audio_player.is_paused()
+        can_play_audio = audio_file_ready and self.audio_player.supported and transcript_loaded and not self.is_busy
+
+        self.start_button.configure(state="disabled" if self.is_busy or not session_selected else "normal")
+        self.refresh_transcript_button.configure(
+            state="disabled" if self.is_busy or not session_selected else "normal"
+        )
+        self.build_audio_button.configure(
+            state="disabled" if self.is_busy or not session_selected else "normal"
+        )
+        self.play_audio_button.configure(state="normal" if can_play_audio else "disabled")
+        self.pause_audio_button.configure(
+            state="normal" if player_loaded and (player_playing or player_paused) and not self.is_busy else "disabled"
+        )
+        self.stop_audio_button.configure(
+            state="normal"
+            if player_loaded and not self.is_busy and (player_playing or player_paused or self.audio_player.get_position_ms() > 0)
+            else "disabled"
+        )
+        self.pause_button_text_var.set("Resume" if player_paused and not player_playing else "Pause")
+
+    def _load_audio_if_needed(self, audio_path: Path) -> None:
+        """Load the session audio file into the player if it is not active yet."""
+
+        resolved_audio_path = audio_path.resolve()
+        if self.audio_player.source_path != resolved_audio_path:
+            self.audio_player.load(resolved_audio_path)
+
+    def _transcript_uses_legacy_offsets(self, bundle: TranscriptBundle) -> bool:
+        """Detect transcripts produced before the TeamSpeak timing fix."""
+
+        try:
+            return self.media_catalog.metadata_uses_legacy_offsets(bundle)
+        except (FileNotFoundError, OSError, ValueError, json.JSONDecodeError):
+            return False
+
+    def _play_session_audio(self) -> None:
+        """Play the combined session audio and keep the transcript synced."""
+
+        bundle = self.current_transcript_bundle
+        if bundle is None:
+            messagebox.showerror("Missing Transcript", "Load a generated transcript before starting playback.")
+            return
+        if not bundle.combined_audio_path.exists():
+            messagebox.showinfo(
+                "Session Audio Missing",
+                "Build session audio first so the transcript can sync to a combined track.",
+            )
+            return
+
+        try:
+            self._load_audio_if_needed(bundle.combined_audio_path)
+            selected_index = self._get_selected_transcript_index()
+            start_ms: Optional[int] = None
+            if selected_index is not None:
+                start_ms = int(self.current_transcript_segments[selected_index].start * 1000.0)
+            elif self.audio_player.is_paused():
+                self.audio_player.resume()
+                self.status_var.set(f"Resumed playback for {bundle.combined_audio_path.name}.")
+                return
+            elif self.audio_player.get_position_ms() >= max(0, self.audio_player.get_length_ms() - 250):
+                start_ms = 0
+
+            self.audio_player.play(start_ms=start_ms)
+            self.status_var.set(f"Playing {bundle.combined_audio_path.name}.")
+            if start_ms is not None:
+                self._sync_transcript_to_audio(force_position_ms=start_ms)
+        except RuntimeError as exc:
+            messagebox.showerror("Audio Playback Failed", str(exc))
+
+    def _toggle_audio_pause(self) -> None:
+        """Pause or resume the active playback session."""
+
+        if not self.audio_player.is_loaded():
+            return
+
+        try:
+            if self.audio_player.is_paused() and not self.audio_player.is_playing():
+                self.audio_player.resume()
+                self.status_var.set("Resumed session audio.")
+            else:
+                self.audio_player.pause()
+                self.status_var.set("Paused session audio.")
+        except RuntimeError as exc:
+            messagebox.showerror("Audio Playback Failed", str(exc))
+
+    def _stop_audio(self) -> None:
+        """Stop playback and clear transcript highlighting."""
+
+        self.audio_player.stop()
+        self.audio_position_var.set("00:00:00 / 00:00:00")
+        self._set_active_transcript_index(-1)
+
+    def _play_selected_segment(self) -> None:
+        """Start playback from the transcript row selected by the user."""
+
+        if self._get_selected_transcript_index() is None:
+            return
+        self._play_session_audio()
+
+    def _sync_transcript_to_audio(self, force_position_ms: Optional[int] = None) -> None:
+        """Update playback labels and transcript highlighting from the audio player."""
+
+        if not self.audio_player.is_loaded() or not self.current_transcript_segments:
+            return
+
+        position_ms = force_position_ms if force_position_ms is not None else self.audio_player.get_position_ms()
+        length_ms = self.audio_player.get_length_ms()
+        self.audio_position_var.set(
+            f"{format_playback_clock(position_ms)} / {format_playback_clock(length_ms)}"
+        )
+
+        if not self.audio_player.is_playing() and not self.audio_player.is_paused() and position_ms == 0:
+            self._set_active_transcript_index(-1)
+            return
+
+        position_seconds = position_ms / 1000.0
+        next_index = find_segment_index_at_position(
+            self.current_transcript_segments,
+            position_seconds,
+            start_index=self.active_segment_index,
+        )
+        self._set_active_transcript_index(next_index)
+
+    def _set_active_transcript_index(self, index: int) -> None:
+        """Highlight the active transcript row and keep it visible."""
+
+        if self.active_segment_index == index:
+            return
+
+        if 0 <= self.active_segment_index < len(self.transcript_item_ids):
+            previous_item_id = self.transcript_item_ids[self.active_segment_index]
+            self.transcript_tree.item(previous_item_id, tags=())
+
+        self.active_segment_index = index
+
+        if 0 <= index < len(self.transcript_item_ids):
+            current_item_id = self.transcript_item_ids[index]
+            self.transcript_tree.item(current_item_id, tags=("active",))
+            self.transcript_tree.selection_set(current_item_id)
+            self.transcript_tree.focus(current_item_id)
+            self.transcript_tree.see(current_item_id)
+        else:
+            self.transcript_tree.selection_remove(self.transcript_tree.selection())
+
+    def _get_selected_transcript_index(self) -> Optional[int]:
+        """Return the currently selected transcript row index, if any."""
+
+        selection = self.transcript_tree.selection()
+        if not selection:
+            return None
+        try:
+            return self.transcript_item_ids.index(selection[0])
+        except ValueError:
+            return None
+
+    def _on_window_close(self) -> None:
+        """Release audio resources before destroying the main window."""
+
+        self.audio_player.close()
+        self.root.destroy()
+
 
 def format_progress(completed: float, total: float) -> str:
     """Return a compact progress string for the GUI progress table."""
@@ -639,6 +1176,48 @@ def format_progress(completed: float, total: float) -> str:
         return f"{completed:.1f}s"
     percentage = min(100.0, max(0.0, (completed / total) * 100.0))
     return f"{percentage:5.1f}% ({completed:.1f}s / {total:.1f}s)"
+
+
+def format_transcript_timestamp(seconds: float) -> str:
+    """Return a transcript-friendly timestamp label."""
+
+    return format_playback_clock(int(round(max(0.0, seconds) * 1000.0)))
+
+
+def format_playback_clock(milliseconds: int) -> str:
+    """Return ``milliseconds`` as an ``HH:MM:SS`` label."""
+
+    total_seconds = max(0, int(milliseconds // 1000))
+    hours, remainder = divmod(total_seconds, 3600)
+    minutes, seconds = divmod(remainder, 60)
+    return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+
+
+def find_segment_index_at_position(
+    segments: List[TranscriptSegment],
+    position_seconds: float,
+    start_index: int = -1,
+) -> int:
+    """Return the transcript segment index that best matches ``position_seconds``."""
+
+    if not segments:
+        return -1
+
+    clamped_start = max(0, min(start_index, len(segments) - 1))
+    search_order = list(range(clamped_start, len(segments))) + list(range(0, clamped_start))
+
+    for index in search_order:
+        segment = segments[index]
+        if segment.start <= position_seconds <= segment.end:
+            return index
+        if index + 1 < len(segments):
+            next_segment = segments[index + 1]
+            if segment.end <= position_seconds < next_segment.start:
+                return index
+
+    if position_seconds < segments[0].start:
+        return -1
+    return len(segments) - 1
 
 
 def transcript_dir_from_out_base(out_base: Path) -> Path:

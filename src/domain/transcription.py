@@ -9,7 +9,6 @@ front-end can drive the functions here without modification.
 """
 
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
 from multiprocessing import Process, Queue, cpu_count
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Tuple, Literal
@@ -34,7 +33,7 @@ logger = logging.getLogger(__name__)
 # decode progress as file-relative seconds through the callback argument.
 ProgressReporter = Callable[[float], None]
 BackendTranscribe = Callable[
-    [str, "TranscriptionOptions", Optional[dict], float, str, Optional[ProgressReporter]],
+    [str, "TranscriptionOptions", Optional[dict], str, Optional[ProgressReporter]],
     List[Dict],
 ]
 
@@ -67,20 +66,6 @@ class TranscriptionOptions:
     resolved_device: Optional[Literal["cpu", "cuda"]] = None
     resolved_compute_type: Optional[str] = None
     runtime_notes: List[str] = field(default_factory=list)
-
-
-def parse_ts_from_name(name: str) -> Optional[float]:
-    """Extract an absolute timestamp (seconds) from a filename if present."""
-
-    m = TS_RE.search(name)
-    if not m:
-        return None
-    date_s, time_s, frac = m.groups()
-    micro = int((frac or "0").ljust(6, "0")[:6])
-    dt = datetime.strptime(f"{date_s} {time_s}", "%Y-%m-%d %H-%M-%S").replace(
-        tzinfo=timezone.utc
-    )
-    return dt.timestamp() + micro / 1_000_000.0
 
 
 def fmt(ts: float) -> str:
@@ -231,7 +216,6 @@ def worker_transcribe(
     file_path: str,
     options: TranscriptionOptions,
     vad_params: Optional[dict],
-    offset: float,
     cpu_threads: int,
     prog_q: Queue,
     speaker_label: str,
@@ -277,7 +261,6 @@ def worker_transcribe(
         audio_path=file_path,
         options=options,
         vad_params=vad_params,
-        offset=offset,
         speaker_label=speaker_label,
         progress_callback=report_progress,
     )
@@ -303,7 +286,6 @@ def run_parallel(
     files: List[str],
     workers: int,
     speakers: Dict[str, str],
-    offsets: Dict[str, float],
     options: TranscriptionOptions,
     progress_callback: Optional[Callable[[Dict], None]] = None,
 ) -> List[str]:
@@ -331,14 +313,12 @@ def run_parallel(
             os.path.basename(path).lower(),
             os.path.splitext(os.path.basename(path))[0],
         )
-        off = float(offsets.get(os.path.basename(path).lower(), 0.0))
         p = Process(
             target=worker_transcribe,
             args=(
                 path,
                 options,
                 vad_params,
-                off,
                 options.cpu_threads,
                 prog_q,
                 label,
@@ -421,34 +401,6 @@ def derive_suggested_label(filename: str) -> str:
     base = re.sub(r"[_\- ]+$", "", base)
 
     return base or "speaker"
-
-
-def filename_offsets(files: List[str], input_dir: str, baseline: str) -> Dict[str, float]:
-    all_candidates: List[Tuple[str, float]] = []
-    for f in sorted(os.listdir(input_dir)):
-        if f.lower().endswith(AUDIO_EXTS):
-            ts = parse_ts_from_name(f)
-            if ts is not None:
-                all_candidates.append((f, ts))
-    if not all_candidates:
-        return {}
-
-    if baseline == "capture":
-        base_ts = next((ts for (f, ts) in all_candidates if f.lower().startswith("capture_")), None)
-        if base_ts is None:
-            base_ts = min(ts for _, ts in all_candidates)
-    else:
-        base_ts = min(ts for _, ts in all_candidates)
-
-    offsets: Dict[str, float] = {}
-    for path in files:
-        name = os.path.basename(path)
-        ts = parse_ts_from_name(name)
-        if ts is not None:
-            offsets[name.lower()] = float(ts - base_ts)
-    return offsets
-
-
 class TranscriptionService:
     """Facade used by front-ends to transcribe recording sessions."""
 
@@ -516,12 +468,9 @@ class TranscriptionService:
         input_dir: str,
         out_base: str,
         speakers: Dict[str, str],
-        offsets: Optional[Dict[str, float]] = None,
         workers: int = 0,
         progress_callback: Optional[Callable[[Dict], None]] = None,
         only: Optional[str] = None,
-        skip_filename_ts: bool = False,
-        baseline: str = "earliest",
     ) -> None:
         # Ensure required tools and libraries exist before processing
         self.validate_dependencies()
@@ -539,15 +488,10 @@ class TranscriptionService:
         if workers <= 0:
             workers = min(len(files), max(1, (cpu_count() or 4) // 2))
 
-        offsets = offsets or {}
-        if not skip_filename_ts:
-            offsets.update(filename_offsets(files, input_dir, baseline))
-
         finished_parts = run_parallel(
             files,
             workers,
             speakers,
-            offsets,
             self.options,
             progress_callback=progress_callback,
         )

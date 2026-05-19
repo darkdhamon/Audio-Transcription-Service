@@ -76,6 +76,9 @@ The current GUI preview supports:
 - Editing the suggested speaker names for each audio file
 - Previewing the resolved runtime, model, and backend
 - Running a transcription job in the background with per-file progress updates
+- Viewing saved transcript lines with timestamps and speaker names inside the app
+- Building transcript-synced `*.synced.wav` session audio from the raw TeamSpeak tracks
+- Playing the synced session audio on Windows with transcript row highlighting synced to playback
 
 The CLI remains the most complete surface today, but the GUI now provides a
 desktop entry point without changing the command-line behavior.

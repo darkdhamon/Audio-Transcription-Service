@@ -19,7 +19,6 @@ def transcribe(
     audio_path: str,
     options: "TranscriptionOptions",
     vad_params: Optional[dict],
-    offset: float,
     speaker_label: str,
     progress_callback: Optional["ProgressReporter"] = None,
 ) -> List[Dict]:
@@ -35,8 +34,6 @@ def transcribe(
     vad_params:
         Optional voice activity detection parameters.  When provided VAD is
         applied during transcription.
-    offset:
-        Time offset in seconds applied to every returned segment.
     speaker_label:
         Label to associate with the speaker for all emitted segments.
     progress_callback:
@@ -106,11 +103,9 @@ def transcribe(
         end_seconds = float(seg.get("end", 0.0))
         if progress_callback is not None:
             progress_callback(end_seconds)
-        start = start_seconds + offset
-        end = end_seconds + offset
         text = seg.get("text", "").strip()
         formatted.append(
-            {"start": start, "end": end, "text": text, "speaker": speaker_label}
+            {"start": start_seconds, "end": end_seconds, "text": text, "speaker": speaker_label}
         )
 
     return formatted

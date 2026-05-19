@@ -27,7 +27,6 @@ from domain.transcription import (
     TranscriptionOptions,
     TranscriptionService,
     derive_suggested_label,
-    filename_offsets,
     list_audio_files,
 )
 from domain.config import GameProfile
@@ -161,7 +160,7 @@ def build_options(args: argparse.Namespace) -> TranscriptionOptions:
 
 
 def main(profile: Optional[GameProfile] = None) -> Dict[str, str]:
-    ap = argparse.ArgumentParser(description="Parallel multitrack transcription with Rich progress bars, filename timestamp alignment, and speaker prompts.")
+    ap = argparse.ArgumentParser(description="Parallel multitrack transcription with Rich progress bars and speaker prompts.")
     ap.add_argument(
         "--model",
         default="auto",
@@ -210,8 +209,6 @@ def main(profile: Optional[GameProfile] = None) -> Dict[str, str]:
         action="store_true",
         help="Print detected hardware and resolved runtime settings before exiting.",
     )
-    ap.add_argument("--no-filename-ts", action="store_true")
-    ap.add_argument("--baseline", choices=["earliest", "capture"], default="earliest")
     ap.add_argument("--no-prompt", action="store_true")
     ap.add_argument("--squelch", action="store_true")
     ap.add_argument("--squelch-max-dur", type=float, default=1.2)
@@ -262,16 +259,6 @@ def main(profile: Optional[GameProfile] = None) -> Dict[str, str]:
     if not files:
         raise SystemExit("No audio files found (capture_* are ignored by design).")
 
-    offsets: Dict[str, float] = {}
-    if not args.no_filename_ts:
-        offsets.update(
-            filename_offsets([str(f) for f in files], str(input_dir), args.baseline)
-        )
-        if offsets:
-            console.print("[dim]Auto-offsets from filenames:[/dim]")
-            for name, off in sorted(offsets.items()):
-                console.print(f"  {name} -> +{off:.3f}s")
-
     if args.no_prompt:
         speakers = {p.name.lower(): derive_suggested_label(p.name) for p in files}
     else:
@@ -286,12 +273,9 @@ def main(profile: Optional[GameProfile] = None) -> Dict[str, str]:
             str(input_dir),
             str(out_base),
             speakers,
-            offsets=offsets,
             workers=args.workers,
             progress_callback=progress.handle,
             only=args.only,
-            skip_filename_ts=args.no_filename_ts,
-            baseline=args.baseline,
         )
 
     console.print(
