@@ -39,11 +39,19 @@ if (-not (Get-Command choco.exe -ErrorAction SilentlyContinue)) {
     Invoke-Expression ((New-Object System.Net.WebClient).DownloadString('https://community.chocolatey.org/install.ps1'))
 }
 
-# Install core tools using Chocolatey.
-choco install -y git python ffmpeg
+# WhisperX currently supports Python 3.13 but not Python 3.14. Install the
+# versioned package so a new machine does not silently select an unsupported
+# interpreter when Chocolatey's unversioned Python package advances.
+choco install -y git python313 ffmpeg
 
 # Refresh PATH so the freshly installed Python is visible in this session.
 $env:Path = [System.Environment]::GetEnvironmentVariable("Path", "Machine")
+
+$pythonVersion = py -3.13 -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')"
+if ($pythonVersion -ne "3.13") {
+    Write-Error "Python 3.13 is required for WhisperX, but the Python launcher could not select it."
+    exit 1
+}
 
 $gpuNames = Get-GpuNames
 $hasNvidia = Test-NvidiaGpuPresent -GpuNames $gpuNames
@@ -65,20 +73,20 @@ if ($resolvedTarget -eq "CPU" -and ($gpuNames | Where-Object { $_ -match "AMD|Ra
 }
 
 # Upgrade packaging tools before installing pinned dependencies.
-python -m pip install --upgrade pip setuptools wheel
+py -3.13 -m pip install --upgrade pip setuptools wheel
 
 # Install PyTorch.
 if ($resolvedTarget -eq "CUDA") {
     Write-Host "Installing CUDA-enabled PyTorch 2.8.0 (CUDA 12.6)..." -ForegroundColor Cyan
-    python -m pip install torch==2.8.0 torchvision==0.23.0 torchaudio==2.8.0 --index-url https://download.pytorch.org/whl/cu126
+    py -3.13 -m pip install torch==2.8.0 torchvision==0.23.0 torchaudio==2.8.0 --index-url https://download.pytorch.org/whl/cu126
 } else {
     Write-Host "Installing CPU-only PyTorch 2.8.0..." -ForegroundColor Cyan
-    python -m pip install torch==2.8.0 torchvision==0.23.0 torchaudio==2.8.0 --index-url https://download.pytorch.org/whl/cpu
+    py -3.13 -m pip install torch==2.8.0 torchvision==0.23.0 torchaudio==2.8.0 --index-url https://download.pytorch.org/whl/cpu
 }
 
 # Install the transcription backends used by the app. These versions update
 # the stack while remaining compatible with the CPU and CUDA paths above.
-python -m pip install `
+py -3.13 -m pip install `
     faster-whisper==1.2.1 `
     whisperx==3.8.5 `
     rich==15.0.0

@@ -21,6 +21,21 @@ Set-ExecutionPolicy Bypass -Scope Process -Force
 
 If the machine has an AMD GPU, the current application still uses the CPU inference path. The runtime does not expose a DirectML backend today, so AMD systems remain CPU-first for compatibility.
 
+## Install Python dependencies
+
+If you already have Python available, use Python 3.13 because WhisperX does
+not currently support Python 3.14. FFmpeg must also be installed separately,
+with both `ffmpeg` and `ffprobe` available on `PATH`. On Windows, the pre-setup
+script above installs the supported Python version and FFmpeg automatically.
+
+After those prerequisites are available, install the Python packages with:
+
+```bash
+python -m pip install -r requirements.txt
+```
+
+This installs the Rich console helper along with both Whisper backends (`faster-whisper` by default and `whisperx` as an optional alternative) so the CLI and GUI can import their dependencies successfully.
+
 ## Running the application
 
 Once dependencies are installed, launch the transcription CLI with:
