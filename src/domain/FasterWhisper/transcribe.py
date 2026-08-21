@@ -5,15 +5,15 @@ from __future__ import annotations
 from typing import Dict, List, Optional, TYPE_CHECKING
 
 if TYPE_CHECKING:  # pragma: no cover - imported for type hints only
-    from domain.transcription import TranscriptionOptions
+    from domain.transcription import ProgressReporter, TranscriptionOptions
 
 
 def transcribe(
     audio_path: str,
     options: "TranscriptionOptions",
     vad_params: Optional[dict],
-    offset: float,
     speaker_label: str,
+    progress_callback: Optional["ProgressReporter"] = None,
 ) -> List[Dict]:
     """Transcribe ``audio_path`` using ``faster-whisper`` and return segments.
 
@@ -27,10 +27,11 @@ def transcribe(
     vad_params:
         Optional voice activity detection parameters.  When provided VAD is
         applied during transcription.
-    offset:
-        Time offset in seconds applied to every returned segment.
     speaker_label:
         Label to associate with the speaker for all emitted segments.
+    progress_callback:
+        Optional callback that receives file-relative decode progress in
+        seconds as segments become available from ``faster-whisper``.
 
     Returns
     -------
@@ -46,18 +47,24 @@ def transcribe(
             "The 'faster-whisper' package is required. Install it with 'pip install faster-whisper'."
         ) from exc
 
+    resolved_model = options.resolved_model_load_target or options.resolved_model or options.model
+    resolved_device = options.resolved_device or "cpu"
+    resolved_compute_type = options.resolved_compute_type or "int8"
+
     model = WhisperModel(
-        options.model,
-        device="cpu",
-        compute_type="int8",
+        resolved_model,
+        device=resolved_device,
+        compute_type=resolved_compute_type,
         cpu_threads=options.cpu_threads or 0,
     )
 
     transcribe_kwargs: Dict = dict(
         language=options.lang
-        if options.model not in ("large", "large-v2", "large-v3")
+        if resolved_model not in ("large", "large-v2", "large-v3")
         else None,
-        vad_filter=bool(vad_params),
+        # ``options.vad`` enables the backend's default VAD even when the
+        # caller did not supply custom VAD thresholds.
+        vad_filter=options.vad,
         beam_size=options.beam,
         temperature=options.temperature,
     )
@@ -68,11 +75,13 @@ def transcribe(
 
     formatted: List[Dict] = []
     for seg in segments:
-        start = float(getattr(seg, "start", 0.0)) + offset
-        end = float(getattr(seg, "end", 0.0)) + offset
+        start_seconds = float(getattr(seg, "start", 0.0))
+        end_seconds = float(getattr(seg, "end", 0.0))
+        if progress_callback is not None:
+            progress_callback(end_seconds)
         text = getattr(seg, "text", "").strip()
         formatted.append(
-            {"start": start, "end": end, "text": text, "speaker": speaker_label}
+            {"start": start_seconds, "end": end_seconds, "text": text, "speaker": speaker_label}
         )
 
     return formatted

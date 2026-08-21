@@ -12,15 +12,15 @@ and returns a normalized list of transcription segments.
 from typing import Dict, List, Optional, TYPE_CHECKING
 
 if TYPE_CHECKING:  # pragma: no cover - used only for type hints
-    from domain.transcription import TranscriptionOptions
+    from domain.transcription import ProgressReporter, TranscriptionOptions
 
 
 def transcribe(
     audio_path: str,
     options: "TranscriptionOptions",
     vad_params: Optional[dict],
-    offset: float,
     speaker_label: str,
+    progress_callback: Optional["ProgressReporter"] = None,
 ) -> List[Dict]:
     """Transcribe ``audio_path`` using WhisperX and return speech segments.
 
@@ -34,10 +34,12 @@ def transcribe(
     vad_params:
         Optional voice activity detection parameters.  When provided VAD is
         applied during transcription.
-    offset:
-        Time offset in seconds applied to every returned segment.
     speaker_label:
         Label to associate with the speaker for all emitted segments.
+    progress_callback:
+        Optional callback that receives file-relative progress in seconds.
+        WhisperX does not stream segments as early as FasterWhisper, but the
+        callback still lets the caller observe segment timing once available.
 
     Returns
     -------
@@ -53,13 +55,16 @@ def transcribe(
             "The 'whisperx' package is required. Install it with 'pip install whisperx'."
         ) from exc
 
-    # Load the WhisperX model on CPU using an int8 compute type to reduce
-    # memory usage.  ``cpu_threads`` is sourced from the options dataclass to
-    # keep configuration centralized.
+    resolved_model = options.resolved_model_load_target or options.resolved_model or options.model
+    resolved_device = options.resolved_device or "cpu"
+    resolved_compute_type = options.resolved_compute_type or "int8"
+
+    # Load the WhisperX model using the resolved runtime selection so the same
+    # code path can use either CPU inference or NVIDIA CUDA acceleration.
     model = whisperx.load_model(
-        options.model,
-        device="cpu",
-        compute_type="int8",
+        resolved_model,
+        device=resolved_device,
+        compute_type=resolved_compute_type,
         cpu_threads=options.cpu_threads or 0,
     )
 
@@ -68,7 +73,7 @@ def transcribe(
     # smaller multilingual models.
     transcribe_kwargs: Dict = {
         "language": options.lang
-        if options.model not in ("large", "large-v2", "large-v3")
+        if resolved_model not in ("large", "large-v2", "large-v3")
         else None
     }
     if vad_params:
@@ -83,7 +88,7 @@ def transcribe(
     # segment timings.
     try:
         align_model, metadata = whisperx.load_align_model(
-            language=options.lang, device="cpu"
+            language=options.lang, device=resolved_device
         )
         aligned = whisperx.align(
             segments, align_model, metadata, audio_path, return_char_alignments=False
@@ -94,11 +99,13 @@ def transcribe(
 
     formatted: List[Dict] = []
     for seg in segments:
-        start = float(seg.get("start", 0.0)) + offset
-        end = float(seg.get("end", 0.0)) + offset
+        start_seconds = float(seg.get("start", 0.0))
+        end_seconds = float(seg.get("end", 0.0))
+        if progress_callback is not None:
+            progress_callback(end_seconds)
         text = seg.get("text", "").strip()
         formatted.append(
-            {"start": start, "end": end, "text": text, "speaker": speaker_label}
+            {"start": start_seconds, "end": end_seconds, "text": text, "speaker": speaker_label}
         )
 
     return formatted

@@ -21,17 +21,25 @@ from rich.progress import (
     TimeRemainingColumn,
     SpinnerColumn,
 )
+from rich.text import Text
 
 from domain.transcription import (
     TranscriptionOptions,
     TranscriptionService,
     derive_suggested_label,
-    filename_offsets,
     list_audio_files,
 )
 from domain.config import GameProfile
 
 console = Console()
+
+
+def format_runtime_summary(runtime_description: str) -> Text:
+    """Build a plain-text runtime summary with predictable Rich rendering."""
+
+    summary = Text("Runtime: ", style="dim")
+    summary.append(runtime_description)
+    return summary
 
 
 class RichProgressHandler:
@@ -44,7 +52,7 @@ class RichProgressHandler:
             BarColumn(),
             TextColumn("{task.percentage:>5.1f}%"),
             TimeElapsedColumn(),
-            TextColumn("• ETA:"),
+            TextColumn("ETA:"),
             TimeRemainingColumn(),
             console=console,
             transient=False,
@@ -78,7 +86,9 @@ class RichProgressHandler:
             path = Path(msg["file"])
             task = self.task_by_file.get(path)
             if task is not None:
-                self.progress.update(task, advance=0)
+                task_info = self.progress.tasks[task]
+                total = task_info.total if task_info.total is not None else task_info.completed
+                self.progress.update(task, completed=total)
                 self.progress.stop_task(task)
 
 
@@ -142,30 +152,63 @@ def build_options(args: argparse.Namespace) -> TranscriptionOptions:
         squelch_max_dur=args.squelch_max_dur,
         junk_words=[w.strip().lower() for w in args.junk_words.split(',') if w.strip()],
         skip_existing=args.skip_existing,
+        device=args.device,
+        compute_type=args.compute_type,
         # Select the transcription backend engine
         engine=args.engine,
     )
 
 
 def main(profile: Optional[GameProfile] = None) -> Dict[str, str]:
-    ap = argparse.ArgumentParser(description="Parallel multitrack transcription with Rich progress bars, filename timestamp alignment, and speaker prompts.")
-    ap.add_argument("--model", default="small")
+    ap = argparse.ArgumentParser(description="Parallel multitrack transcription with Rich progress bars and speaker prompts.")
+    ap.add_argument(
+        "--model",
+        default="auto",
+        help="Model to use. 'auto' resolves to a hardware-friendly default.",
+    )
     ap.add_argument("--lang", default="en")
     ap.add_argument("--input", default=".")
     ap.add_argument("--out", default="rpg_transcript")
     ap.add_argument("--beam", type=int, default=5)
     ap.add_argument("--temperature", type=float, default=0.2, help="Decoding temperature (0.0=deterministic)")
-    ap.add_argument("--vad", action="store_true")
+    ap.add_argument(
+        "--vad",
+        dest="vad",
+        action="store_true",
+        help="Enable voice activity detection (default).",
+    )
+    ap.add_argument(
+        "--no-vad",
+        dest="vad",
+        action="store_false",
+        help="Disable voice activity detection.",
+    )
+    ap.set_defaults(vad=True)
     ap.add_argument("--vad-threshold", type=float, default=None)
     ap.add_argument("--min-speech-ms", type=int, default=None)
     ap.add_argument("--min-silence-ms", type=int, default=None)
     ap.add_argument("--speech-pad-ms", type=int, default=None)
     ap.add_argument("--workers", type=int, default=0)
     ap.add_argument("--cpu-threads", type=int, default=0)
+    ap.add_argument(
+        "--device",
+        choices=["auto", "cpu", "cuda"],
+        default="auto",
+        help="Execution device. 'auto' prefers CUDA when supported by the selected backend.",
+    )
+    ap.add_argument(
+        "--compute-type",
+        choices=["auto", "int8", "int8_float16", "float16", "float32"],
+        default="auto",
+        help="Inference compute type. 'auto' selects a device-appropriate default.",
+    )
     ap.add_argument("--only")
     ap.add_argument("--merge-parts", action="store_true")
-    ap.add_argument("--no-filename-ts", action="store_true")
-    ap.add_argument("--baseline", choices=["earliest", "capture"], default="earliest")
+    ap.add_argument(
+        "--show-hardware",
+        action="store_true",
+        help="Print detected hardware and resolved runtime settings before exiting.",
+    )
     ap.add_argument("--no-prompt", action="store_true")
     ap.add_argument("--squelch", action="store_true")
     ap.add_argument("--squelch-max-dur", type=float, default=1.2)
@@ -187,6 +230,20 @@ def main(profile: Optional[GameProfile] = None) -> Dict[str, str]:
     input_dir = Path(args.input)
     out_base = Path(args.out)
 
+    runtime = service.resolve_runtime()
+    hardware = service.detect_hardware()
+
+    console.print(format_runtime_summary(runtime.describe()), highlight=False)
+    if hardware and hardware.gpu_names:
+        console.print(f"[dim]Detected GPUs:[/dim] {', '.join(hardware.gpu_names)}")
+    else:
+        console.print("[dim]Detected GPUs:[/dim] none")
+    for note in runtime.notes:
+        console.print(f"[dim]{note}[/dim]")
+
+    if args.show_hardware:
+        return {}
+
     if args.merge_parts:
         count = service.merge_parts(str(input_dir), str(out_base))
         console.print(f"Merged {count} part files -> {out_base}.txt / .srt / .json")
@@ -202,23 +259,13 @@ def main(profile: Optional[GameProfile] = None) -> Dict[str, str]:
     if not files:
         raise SystemExit("No audio files found (capture_* are ignored by design).")
 
-    offsets: Dict[str, float] = {}
-    if not args.no_filename_ts:
-        offsets.update(
-            filename_offsets([str(f) for f in files], str(input_dir), args.baseline)
-        )
-        if offsets:
-            console.print("[dim]Auto-offsets from filenames:[/dim]")
-            for name, off in sorted(offsets.items()):
-                console.print(f"  {name} -> +{off:.3f}s")
-
     if args.no_prompt:
         speakers = {p.name.lower(): derive_suggested_label(p.name) for p in files}
     else:
         speakers = prompt_speaker_names(files, profile)
 
     console.print(
-        f"Processing {len(files)} file(s) with up to {args.workers or 'auto'} parallel worker(s)…"
+        f"Processing {len(files)} file(s) with up to {args.workers or 'auto'} parallel worker(s)..."
     )
 
     with RichProgressHandler() as progress:
@@ -226,12 +273,9 @@ def main(profile: Optional[GameProfile] = None) -> Dict[str, str]:
             str(input_dir),
             str(out_base),
             speakers,
-            offsets=offsets,
             workers=args.workers,
             progress_callback=progress.handle,
             only=args.only,
-            skip_filename_ts=args.no_filename_ts,
-            baseline=args.baseline,
         )
 
     console.print(

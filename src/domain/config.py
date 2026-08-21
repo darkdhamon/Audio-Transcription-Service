@@ -19,8 +19,40 @@ framework without modification.
 
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 import json
+
+
+class JsonConfigStore:
+    """Safely load and save the small JSON documents used by the app."""
+
+    @staticmethod
+    def load_dict(path: Path) -> Dict[str, Any]:
+        """Return the JSON object stored in ``path`` or an empty dict.
+
+        Local state files may be missing or temporarily malformed, for example
+        when a merge leaves conflict markers behind.  Returning an empty
+        configuration keeps the launcher usable while preserving the file for
+        manual inspection.
+        """
+
+        if not path.exists():
+            return {}
+        try:
+            with path.open("r", encoding="utf-8") as f:
+                data = json.load(f)
+        except (OSError, json.JSONDecodeError):
+            return {}
+        return data if isinstance(data, dict) else {}
+
+    @staticmethod
+    def save_dict(path: Path, data: Dict[str, Any]) -> None:
+        """Persist ``data`` as formatted JSON."""
+
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2)
+
 
 # ---------------------------------------------------------------------------
 # App settings
@@ -45,19 +77,22 @@ class AppSettings:
         """Load settings from ``path``.  If the file does not exist a
         default configuration is returned."""
 
-        if not path.exists():
-            # Default to current working directory if nothing was stored yet
+        data = JsonConfigStore.load_dict(path)
+        # Support both the original launcher key and the newer dataclass-style
+        # key so existing user configuration keeps working.
+        directory = data.get("recording_directory") or data.get("RecordingDirectory")
+        if not directory:
+            # Default to current working directory if nothing was stored yet.
             return cls(recording_directory=Path.cwd())
-        with path.open("r", encoding="utf-8") as f:
-            data = json.load(f)
-        return cls(recording_directory=Path(data.get("recording_directory", ".")))
+        return cls(recording_directory=Path(str(directory)))
 
     def save(self, path: Path) -> None:
         """Persist settings to ``path``."""
 
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with path.open("w", encoding="utf-8") as f:
-            json.dump({"recording_directory": str(self.recording_directory)}, f, indent=2)
+        JsonConfigStore.save_dict(
+            path,
+            {"RecordingDirectory": str(self.recording_directory)},
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -123,10 +158,7 @@ class GameSettings:
 
     @classmethod
     def load(cls, path: Path) -> "GameSettings":
-        if not path.exists():
-            return cls()
-        with path.open("r", encoding="utf-8") as f:
-            raw = json.load(f)
+        raw = JsonConfigStore.load_dict(path)
         profiles = {
             name: GameProfile(
                 campaign=p.get("campaign", name),
@@ -137,7 +169,6 @@ class GameSettings:
         return cls(profiles=profiles)
 
     def save(self, path: Path) -> None:
-        path.parent.mkdir(parents=True, exist_ok=True)
         data = {
             "profiles": {
                 name: {
@@ -147,8 +178,7 @@ class GameSettings:
                 for name, profile in self.profiles.items()
             }
         }
-        with path.open("w", encoding="utf-8") as f:
-            json.dump(data, f, indent=2)
+        JsonConfigStore.save_dict(path, data)
 
 
 # ---------------------------------------------------------------------------
@@ -165,24 +195,18 @@ class LastSession:
 
     @classmethod
     def load(cls, path: Path) -> "LastSession":
-        if not path.exists():
-            return cls()
-        with path.open("r", encoding="utf-8") as f:
-            data = json.load(f)
+        data = JsonConfigStore.load_dict(path)
         return cls(
             recording_session=data.get("recording_session"),
             game_profile=data.get("game_profile"),
         )
 
     def save(self, path: Path) -> None:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with path.open("w", encoding="utf-8") as f:
-            json.dump(
-                {
-                    "recording_session": self.recording_session,
-                    "game_profile": self.game_profile,
-                },
-                f,
-                indent=2,
-            )
+        JsonConfigStore.save_dict(
+            path,
+            {
+                "recording_session": self.recording_session,
+                "game_profile": self.game_profile,
+            },
+        )
 
