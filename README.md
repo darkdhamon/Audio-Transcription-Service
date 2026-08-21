@@ -23,7 +23,12 @@ If the machine has an AMD GPU, the current application still uses the CPU infere
 
 ## Install Python dependencies
 
-If you already have Python available, install the required packages with:
+If you already have Python available, use Python 3.13 because WhisperX does
+not currently support Python 3.14. FFmpeg must also be installed separately,
+with both `ffmpeg` and `ffprobe` available on `PATH`. On Windows, the pre-setup
+script above installs the supported Python version and FFmpeg automatically.
+
+After those prerequisites are available, install the Python packages with:
 
 ```bash
 python -m pip install -r requirements.txt
